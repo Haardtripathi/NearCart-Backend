@@ -5,10 +5,11 @@ const {
   getOrderByIdHandler,
   listOrdersHandler,
 } = require('../controllers/orders.controller')
+const { optionalAuth } = require('../middleware/auth')
 
 const router = express.Router()
 
-router.post('/orders', createOrderHandler)
+router.post('/orders', optionalAuth, createOrderHandler)
 router.get('/orders', listOrdersHandler)
 router.get('/orders/:orderId', getOrderByIdHandler)
 

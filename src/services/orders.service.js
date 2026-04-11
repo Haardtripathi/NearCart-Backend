@@ -1,64 +1,7 @@
 const prisma = require('../lib/prisma')
+const { mapOrder, mapOrderPreview } = require('../utils/serializers')
 const { createHttpError } = require('../utils/httpError')
-
-function normalizeOptionalString(value) {
-  const normalizedValue = value?.trim()
-
-  return normalizedValue ? normalizedValue : null
-}
-
-function mapOrderItemForResponse(item) {
-  return {
-    id: item.id,
-    orderId: item.orderId,
-    storeProductId: item.storeProductId,
-    name: item.name,
-    brand: item.brand,
-    size: item.size,
-    image: item.image,
-    price: item.price,
-    mrp: item.mrp,
-    quantity: item.quantity,
-    lineTotal: item.lineTotal,
-  }
-}
-
-function mapOrderForResponse(order) {
-  return {
-    id: order.id,
-    orderNumber: order.orderNumber,
-    shopId: order.shopId,
-    shopName: order.shopName,
-    status: order.status,
-    customerName: order.customerName,
-    customerPhone: order.customerPhone,
-    customerEmail: order.customerEmail,
-    deliveryAddressLine1: order.deliveryAddressLine1,
-    deliveryAddressLine2: order.deliveryAddressLine2,
-    city: order.city,
-    area: order.area,
-    pincode: order.pincode,
-    notes: order.notes,
-    paymentMethod: order.paymentMethod,
-    subtotal: order.subtotal,
-    totalAmount: order.totalAmount,
-    createdAt: order.createdAt,
-    placedAt: order.placedAt,
-    items: order.items.map(mapOrderItemForResponse),
-  }
-}
-
-function mapOrderPreview(order) {
-  return {
-    id: order.id,
-    orderNumber: order.orderNumber,
-    status: order.status,
-    totalAmount: order.totalAmount,
-    shopName: order.shopName,
-    customerName: order.customerName,
-    placedAt: order.placedAt,
-  }
-}
+const { normalizeOptionalString } = require('../utils/user')
 
 async function createOrderNumber(transaction, placedAt) {
   const datePrefix = placedAt.toISOString().slice(0, 10).replaceAll('-', '')
@@ -103,10 +46,51 @@ function buildOrderItems(items, shopId) {
   }))
 }
 
-async function createOrder(payload) {
+async function resolveOrderShop(shopId) {
+  return prisma.shop.findFirst({
+    where: {
+      OR: [{ slug: shopId }, { id: shopId }],
+      approvalStatus: 'APPROVED',
+      isActive: true,
+    },
+  })
+}
+
+async function resolveCustomerAddress(customerUserId, addressId) {
+  if (!addressId) {
+    return null
+  }
+
+  if (!customerUserId) {
+    throw createHttpError(400, 'Saved addresses can only be used by signed-in customers')
+  }
+
+  const address = await prisma.address.findFirst({
+    where: {
+      id: addressId,
+      userId: customerUserId,
+    },
+  })
+
+  if (!address) {
+    throw createHttpError(404, 'Saved address not found')
+  }
+
+  return address
+}
+
+async function createOrder(payload, options = {}) {
   const orderItems = buildOrderItems(payload.items, payload.shopId)
   const subtotal = orderItems.reduce((sum, item) => sum + item.lineTotal, 0)
   const placedAt = new Date()
+  const customerAddress = await resolveCustomerAddress(
+    options.customerUserId,
+    normalizeOptionalString(payload.addressId),
+  )
+  const shop = await resolveOrderShop(payload.shopId)
+  const deliveryFee = 0
+  const platformFee = 0
+  const totalAmount = subtotal + deliveryFee + platformFee
 
   const createdOrder = await prisma.$transaction(async (transaction) => {
     const orderNumber = await createOrderNumber(transaction, placedAt)
@@ -114,21 +98,35 @@ async function createOrder(payload) {
     return transaction.order.create({
       data: {
         orderNumber,
-        shopId: payload.shopId,
-        shopName: payload.shopName,
-        status: 'PENDING',
+        customerUserId: options.customerUserId || null,
+        shopId: shop?.slug || payload.shopId,
+        shopRecordId: shop?.id || null,
+        shopName: shop?.name || payload.shopName.trim(),
+        status: 'PENDING_CONFIRMATION',
+        paymentStatus: 'PENDING',
         customerName: payload.customerName.trim(),
         customerPhone: payload.customerPhone.trim(),
         customerEmail: normalizeOptionalString(payload.customerEmail),
-        deliveryAddressLine1: payload.deliveryAddressLine1.trim(),
-        deliveryAddressLine2: normalizeOptionalString(payload.deliveryAddressLine2),
-        city: payload.city.trim(),
-        area: normalizeOptionalString(payload.area),
-        pincode: payload.pincode.trim(),
+        deliveryAddressId: customerAddress?.id ?? null,
+        deliveryAddressLabel: customerAddress?.label ?? null,
+        deliveryAddressLine1:
+          customerAddress?.line1 ?? payload.deliveryAddressLine1.trim(),
+        deliveryAddressLine2:
+          customerAddress?.line2 ??
+          normalizeOptionalString(payload.deliveryAddressLine2),
+        city: customerAddress?.city ?? payload.city.trim(),
+        area: customerAddress?.area ?? normalizeOptionalString(payload.area),
+        pincode: customerAddress?.pincode ?? payload.pincode.trim(),
+        landmark:
+          customerAddress?.landmark ?? normalizeOptionalString(payload.landmark),
+        latitude: customerAddress?.latitude ?? null,
+        longitude: customerAddress?.longitude ?? null,
         notes: normalizeOptionalString(payload.notes),
         paymentMethod: payload.paymentMethod,
         subtotal,
-        totalAmount: subtotal,
+        deliveryFee,
+        platformFee,
+        totalAmount,
         createdAt: placedAt,
         placedAt,
         items: {
@@ -141,7 +139,7 @@ async function createOrder(payload) {
     })
   })
 
-  return mapOrderForResponse(createdOrder)
+  return mapOrder(createdOrder)
 }
 
 async function getOrderById(orderId) {
@@ -156,7 +154,7 @@ async function getOrderById(orderId) {
     throw createHttpError(404, 'Order not found')
   }
 
-  return mapOrderForResponse(order)
+  return mapOrder(order)
 }
 
 async function listOrders() {

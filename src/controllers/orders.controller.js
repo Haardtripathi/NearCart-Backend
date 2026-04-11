@@ -9,7 +9,10 @@ const { checkoutPayloadSchema } = require('../validation/orders.validation')
 async function createOrderHandler(request, response, next) {
   try {
     const payload = checkoutPayloadSchema.parse(request.body)
-    const order = await createOrder(payload)
+    const order = await createOrder(payload, {
+      customerUserId:
+        request.auth?.user?.role === 'CUSTOMER' ? request.auth.userId : null,
+    })
 
     response.status(201).json({
       item: order,

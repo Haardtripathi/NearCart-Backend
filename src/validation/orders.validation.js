@@ -16,6 +16,7 @@ const checkoutItemSchema = z.object({
 const checkoutPayloadSchema = z.object({
   shopId: z.string().trim().min(1, 'Shop identifier is required'),
   shopName: z.string().trim().min(1, 'Shop name is required'),
+  addressId: z.string().trim().optional().or(z.literal('')),
   customerName: z.string().trim().min(1, 'Customer name is required'),
   customerPhone: z.string().trim().min(1, 'Phone is required'),
   customerEmail: z
@@ -29,8 +30,9 @@ const checkoutPayloadSchema = z.object({
   city: z.string().trim().min(1, 'City is required'),
   area: z.string().trim().optional().default(''),
   pincode: z.string().trim().min(1, 'Pincode is required'),
+  landmark: z.string().trim().optional().default(''),
   notes: z.string().trim().optional().default(''),
-  paymentMethod: z.enum(['COD', 'PAY_ON_PICKUP']),
+  paymentMethod: z.enum(['COD', 'ONLINE', 'PAY_ON_PICKUP']),
   items: z
     .array(checkoutItemSchema)
     .min(1, 'At least one cart item is required'),

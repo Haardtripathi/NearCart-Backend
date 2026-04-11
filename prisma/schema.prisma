@@ -6,39 +6,201 @@ datasource db {
   provider = "sqlite"
 }
 
-enum OrderStatus {
+enum UserRole {
+  CUSTOMER
+  SHOP_OWNER
+  ADMIN
+  RIDER
+}
+
+enum ShopApprovalStatus {
   PENDING
+  APPROVED
+  REJECTED
+}
+
+enum OrderStatus {
+  PENDING_CONFIRMATION
+  ACCEPTED
+  REJECTED
+  PREPARING
+  READY_FOR_PICKUP
+  OUT_FOR_DELIVERY
+  DELIVERED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
 }
 
 enum PaymentMethod {
   COD
+  ONLINE
   PAY_ON_PICKUP
+}
+
+enum ShopMembershipRole {
+  OWNER
+  MANAGER
+  STAFF
+}
+
+model User {
+  id               String            @id @default(cuid())
+  fullName         String
+  email            String            @unique
+  phone            String?           @unique
+  passwordHash     String
+  role             UserRole
+  isActive         Boolean           @default(true)
+  isVerified       Boolean           @default(false)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  addresses        Address[]
+  customerOrders   Order[]           @relation("CustomerOrders")
+  customerProfile  CustomerProfile?
+  refreshTokens    RefreshToken[]
+  shopOwnerProfile ShopOwnerProfile?
+}
+
+model CustomerProfile {
+  id               String   @id @default(cuid())
+  userId           String   @unique
+  defaultAddressId String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  defaultAddress   Address? @relation("CustomerDefaultAddress", fields: [defaultAddressId], references: [id], onDelete: SetNull)
+
+  @@index([defaultAddressId])
+}
+
+model ShopOwnerProfile {
+  id           String           @id @default(cuid())
+  userId       String           @unique
+  businessName String
+  gstNumber    String?          @unique
+  isApproved   Boolean          @default(false)
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+  memberships  ShopMembership[]
+  shops        Shop[]
+  user         User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Shop {
+  id             String             @id @default(cuid())
+  ownerProfileId String
+  name           String
+  slug           String             @unique
+  description    String?
+  category       String
+  phone          String
+  email          String?
+  addressLine1   String
+  addressLine2   String?
+  city           String
+  area           String?
+  pincode        String
+  latitude       Float?
+  longitude      Float?
+  openingTime    String?
+  closingTime    String?
+  isActive       Boolean            @default(true)
+  approvalStatus ShopApprovalStatus @default(PENDING)
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+  memberships    ShopMembership[]
+  orders         Order[]
+  ownerProfile   ShopOwnerProfile   @relation(fields: [ownerProfileId], references: [id], onDelete: Cascade)
+
+  @@index([ownerProfileId])
+  @@index([approvalStatus])
+}
+
+model Address {
+  id                         String            @id @default(cuid())
+  userId                     String
+  label                      String
+  fullName                   String
+  phone                      String
+  line1                      String
+  line2                      String?
+  city                       String
+  area                       String?
+  pincode                    String
+  landmark                   String?
+  latitude                   Float?
+  longitude                  Float?
+  isDefault                  Boolean           @default(false)
+  createdAt                  DateTime          @default(now())
+  updatedAt                  DateTime          @updatedAt
+  customerDefaultForProfiles CustomerProfile[] @relation("CustomerDefaultAddress")
+  user                       User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([isDefault])
+}
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  userId     String
+  tokenHash  String   @unique
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  revokedAt  DateTime?
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
 }
 
 model Order {
   id                   String        @id @default(cuid())
   orderNumber          String        @unique
+  customerUserId       String?
   shopId               String
+  shopRecordId         String?
   shopName             String
-  status               OrderStatus   @default(PENDING)
+  status               OrderStatus   @default(PENDING_CONFIRMATION)
+  paymentStatus        PaymentStatus @default(PENDING)
+  paymentMethod        PaymentMethod
   customerName         String
   customerPhone        String
   customerEmail        String?
+  deliveryAddressId    String?
+  deliveryAddressLabel String?
   deliveryAddressLine1 String
   deliveryAddressLine2 String?
   city                 String
   area                 String?
   pincode              String
+  landmark             String?
+  latitude             Float?
+  longitude            Float?
   notes                String?
-  paymentMethod        PaymentMethod
   subtotal             Int
+  deliveryFee          Int           @default(0)
+  platformFee          Int           @default(0)
   totalAmount          Int
-  createdAt            DateTime      @default(now())
   placedAt             DateTime      @default(now())
+  acceptedAt           DateTime?
+  deliveredAt          DateTime?
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+  customerUser         User?         @relation("CustomerOrders", fields: [customerUserId], references: [id], onDelete: SetNull)
   items                OrderItem[]
+  shop                 Shop?         @relation(fields: [shopRecordId], references: [id], onDelete: SetNull)
 
   @@index([createdAt])
+  @@index([customerUserId])
   @@index([shopId])
+  @@index([shopRecordId])
+  @@index([status])
 }
 
 model OrderItem {
@@ -57,4 +219,17 @@ model OrderItem {
   order          Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
   @@index([orderId])
+}
+
+model ShopMembership {
+  id             String             @id @default(cuid())
+  shopId          String
+  ownerProfileId  String
+  role            ShopMembershipRole @default(OWNER)
+  createdAt       DateTime           @default(now())
+  ownerProfile    ShopOwnerProfile   @relation(fields: [ownerProfileId], references: [id], onDelete: Cascade)
+  shop            Shop               @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  @@unique([shopId, ownerProfileId])
+  @@index([ownerProfileId])
 }

@@ -4,6 +4,12 @@ const parsePort = (value, fallback) => {
   return Number.isNaN(parsedValue) ? fallback : parsedValue
 }
 
+const parseInteger = (value, fallback) => {
+  const parsedValue = Number.parseInt(value ?? '', 10)
+
+  return Number.isNaN(parsedValue) ? fallback : parsedValue
+}
+
 const parseOrigins = (value) =>
   value
     .split(',')
@@ -22,4 +28,13 @@ module.exports = {
   corsOrigins: parseOrigins(configuredOrigins),
   inventoryServiceUrl: process.env.INVENTORY_SERVICE_URL || '',
   databaseUrl: process.env.DATABASE_URL || 'file:./prisma/nearcart.db',
+  jwtAccessSecret: process.env.JWT_ACCESS_SECRET || 'nearcart-dev-access-secret',
+  jwtAccessExpiresIn: process.env.JWT_ACCESS_EXPIRES_IN || '15m',
+  refreshTokenTtlDays: parseInteger(process.env.AUTH_REFRESH_TTL_DAYS, 30),
+  authRefreshCookieName:
+    process.env.AUTH_REFRESH_COOKIE_NAME || 'nearcart_refresh',
+  adminBootstrapEmail: process.env.ADMIN_BOOTSTRAP_EMAIL || '',
+  adminBootstrapPassword: process.env.ADMIN_BOOTSTRAP_PASSWORD || '',
+  adminBootstrapFullName:
+    process.env.ADMIN_BOOTSTRAP_FULL_NAME || 'NearCart Platform Admin',
 }
