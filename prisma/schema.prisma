@@ -1,0 +1,60 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+enum OrderStatus {
+  PENDING
+}
+
+enum PaymentMethod {
+  COD
+  PAY_ON_PICKUP
+}
+
+model Order {
+  id                   String        @id @default(cuid())
+  orderNumber          String        @unique
+  shopId               String
+  shopName             String
+  status               OrderStatus   @default(PENDING)
+  customerName         String
+  customerPhone        String
+  customerEmail        String?
+  deliveryAddressLine1 String
+  deliveryAddressLine2 String?
+  city                 String
+  area                 String?
+  pincode              String
+  notes                String?
+  paymentMethod        PaymentMethod
+  subtotal             Int
+  totalAmount          Int
+  createdAt            DateTime      @default(now())
+  placedAt             DateTime      @default(now())
+  items                OrderItem[]
+
+  @@index([createdAt])
+  @@index([shopId])
+}
+
+model OrderItem {
+  id             String   @id @default(cuid())
+  orderId        String
+  storeProductId String
+  name           String
+  brand          String?
+  size           String?
+  image          String?
+  price          Int
+  mrp            Int?
+  quantity       Int
+  lineTotal      Int
+  createdAt      DateTime @default(now())
+  order          Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+}
