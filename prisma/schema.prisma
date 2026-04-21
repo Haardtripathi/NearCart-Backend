@@ -98,6 +98,7 @@ model Shop {
   name           String
   slug           String             @unique
   description    String?
+  logoImageUrl   String?
   category       String
   phone          String
   email          String?
@@ -110,6 +111,15 @@ model Shop {
   longitude      Float?
   openingTime    String?
   closingTime    String?
+  publicCatalogEnabled Boolean      @default(false)
+  inventoryOrganizationId String?
+  inventoryBranchId String?
+  deliveryEnabled Boolean           @default(true)
+  minimumOrderAmount Int            @default(0)
+  deliveryFeeDefault Int            @default(0)
+  estimatedDeliveryMinutes Int?
+  serviceRadiusKm Float?
+  lastCatalogSyncAt DateTime?
   isActive       Boolean            @default(true)
   approvalStatus ShopApprovalStatus @default(PENDING)
   createdAt      DateTime           @default(now())
@@ -120,6 +130,9 @@ model Shop {
 
   @@index([ownerProfileId])
   @@index([approvalStatus])
+  @@index([publicCatalogEnabled])
+  @@index([inventoryOrganizationId])
+  @@index([inventoryBranchId])
 }
 
 model Address {
@@ -207,9 +220,12 @@ model OrderItem {
   id             String   @id @default(cuid())
   orderId        String
   storeProductId String
+  inventoryProductId String?
+  inventoryVariantId String?
   name           String
   brand          String?
   size           String?
+  unitLabel      String?
   image          String?
   price          Int
   mrp            Int?

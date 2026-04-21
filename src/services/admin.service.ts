@@ -1,4 +1,5 @@
 import prisma from '../lib/prisma'
+import { listInventoryMappingOptions } from './public-storefront.service'
 import { buildMeta } from '../utils/response'
 import {
   mapOrderPreview,
@@ -7,7 +8,11 @@ import {
   mapShopOwnerProfile,
 } from '../utils/serializers'
 import { createHttpError } from '../utils/httpError'
-import type { UpdateShopApprovalInput } from '../validation/admin.validation'
+import { normalizeOptionalString } from '../utils/user'
+import type {
+  UpdateShopApprovalInput,
+  UpdateShopStorefrontInput,
+} from '../validation/admin.validation'
 
 async function listUsers() {
   const users = await prisma.user.findMany({
@@ -150,6 +155,10 @@ async function listShops() {
   return {
     items: shops.map((shop) => ({
       ...mapShop(shop),
+      inventoryMappingStatus:
+        shop.inventoryOrganizationId && shop.inventoryBranchId
+          ? 'MAPPED'
+          : 'UNMAPPED',
       owner: {
         user: mapSafeUser(shop.ownerProfile.user),
         profile: mapShopOwnerProfile(shop.ownerProfile),
@@ -159,6 +168,49 @@ async function listShops() {
       total: shops.length,
       pendingCount: shops.filter((shop) => shop.approvalStatus === 'PENDING').length,
     }),
+  }
+}
+
+async function listInventoryOrganizations(search?: string | null) {
+  const result = await listInventoryMappingOptions(search)
+
+  return {
+    ...result,
+    meta: buildMeta({
+      total: result.items.length,
+    }),
+  }
+}
+
+async function updateShopStorefront(
+  shopId: string,
+  payload: UpdateShopStorefrontInput,
+) {
+  const existingShop = await prisma.shop.findUnique({
+    where: {
+      id: shopId,
+    },
+  })
+
+  if (!existingShop) {
+    throw createHttpError(404, 'Shop not found')
+  }
+
+  const updatedShop = await prisma.shop.update({
+    where: {
+      id: shopId,
+    },
+    data: {
+      inventoryOrganizationId: payload.inventoryOrganizationId.trim(),
+      inventoryBranchId: payload.inventoryBranchId.trim(),
+      publicCatalogEnabled: payload.publicCatalogEnabled,
+      logoImageUrl: normalizeOptionalString(payload.logoImageUrl),
+    },
+  })
+
+  return {
+    item: mapShop(updatedShop),
+    meta: buildMeta(),
   }
 }
 
@@ -186,8 +238,10 @@ async function listOrders() {
 
 export {
   listOrders,
+  listInventoryOrganizations,
   listPendingShopApprovals,
   listShops,
   listUsers,
   updateShopApproval,
+  updateShopStorefront,
 }

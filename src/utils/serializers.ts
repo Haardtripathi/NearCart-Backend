@@ -19,8 +19,27 @@ type CustomerProfileSource = CustomerProfile & {
   defaultAddress?: Address | null
 }
 
+type ShopSource = Shop & {
+  logoImageUrl?: string | null
+  publicCatalogEnabled?: boolean
+  inventoryOrganizationId?: string | null
+  inventoryBranchId?: string | null
+  deliveryEnabled?: boolean
+  minimumOrderAmount?: number
+  deliveryFeeDefault?: number
+  estimatedDeliveryMinutes?: number | null
+  serviceRadiusKm?: number | null
+  lastCatalogSyncAt?: Date | null
+}
+
+type OrderItemSource = OrderItem & {
+  inventoryProductId?: string | null
+  inventoryVariantId?: string | null
+  unitLabel?: string | null
+}
+
 type OrderSource = Order & {
-  items?: OrderItem[] | null
+  items?: OrderItemSource[] | null
 }
 
 function mapAddress(address: Address) {
@@ -88,13 +107,14 @@ function mapShopOwnerProfile(profile: ShopOwnerProfile) {
   }
 }
 
-function mapShop(shop: Shop) {
+function mapShop(shop: ShopSource) {
   return {
     id: shop.id,
     ownerProfileId: shop.ownerProfileId,
     name: shop.name,
     slug: shop.slug,
     description: shop.description,
+    logoImageUrl: shop.logoImageUrl,
     category: shop.category,
     phone: shop.phone,
     email: shop.email,
@@ -107,6 +127,15 @@ function mapShop(shop: Shop) {
     longitude: shop.longitude,
     openingTime: shop.openingTime,
     closingTime: shop.closingTime,
+    publicCatalogEnabled: shop.publicCatalogEnabled,
+    inventoryOrganizationId: shop.inventoryOrganizationId,
+    inventoryBranchId: shop.inventoryBranchId,
+    deliveryEnabled: shop.deliveryEnabled,
+    minimumOrderAmount: shop.minimumOrderAmount,
+    deliveryFeeDefault: shop.deliveryFeeDefault,
+    estimatedDeliveryMinutes: shop.estimatedDeliveryMinutes,
+    serviceRadiusKm: shop.serviceRadiusKm,
+    lastCatalogSyncAt: shop.lastCatalogSyncAt,
     isActive: shop.isActive,
     approvalStatus: shop.approvalStatus,
     createdAt: shop.createdAt,
@@ -114,14 +143,17 @@ function mapShop(shop: Shop) {
   }
 }
 
-function mapOrderItem(item: OrderItem) {
+function mapOrderItem(item: OrderItemSource) {
   return {
     id: item.id,
     orderId: item.orderId,
     storeProductId: item.storeProductId,
+    inventoryProductId: item.inventoryProductId,
+    inventoryVariantId: item.inventoryVariantId,
     name: item.name,
     brand: item.brand,
     size: item.size,
+    unitLabel: item.unitLabel,
     image: item.image,
     price: item.price,
     mrp: item.mrp,

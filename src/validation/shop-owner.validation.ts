@@ -31,6 +31,7 @@ const updateShopOwnerProfileSchema = z
 const createShopSchema = z.object({
   name: z.string().trim().min(2, 'Shop name must be at least 2 characters'),
   description: optionalTrimmedString,
+  logoImageUrl: z.string().trim().url().optional().or(z.literal('')),
   category: z.string().trim().min(2, 'Category is required'),
   phone: z.string().trim().min(6, 'Phone number is required'),
   email: optionalTrimmedString,
@@ -43,6 +44,11 @@ const createShopSchema = z.object({
   longitude: optionalCoordinate,
   openingTime: optionalTrimmedString,
   closingTime: optionalTrimmedString,
+  deliveryEnabled: z.boolean().optional(),
+  minimumOrderAmount: z.number().int().min(0).optional(),
+  deliveryFeeDefault: z.number().int().min(0).optional(),
+  estimatedDeliveryMinutes: z.number().int().min(0).optional().nullable(),
+  serviceRadiusKm: z.number().finite().min(0).optional().nullable(),
 })
 
 const updateShopSchema = createShopSchema

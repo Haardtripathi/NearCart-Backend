@@ -1,43 +1,50 @@
-import type { Request, Response } from 'express'
+import type { NextFunction, Request, Response } from 'express'
 
-import { getShopById, shopPreviews } from '../data/shops'
-import { getInventoryBridgeMeta } from '../services/inventory.service'
 import { getTimestamp } from '../utils/time'
+import {
+  getPublicShop,
+  listPublicShops,
+} from '../services/public-storefront.service'
 
-const listShops = (_request: Request, response: Response): void => {
-  response.status(200).json({
-    items: shopPreviews,
-    meta: {
-      source: 'mock',
-      inventory: getInventoryBridgeMeta(),
-      timestamp: getTimestamp(),
-    },
-  })
-}
+async function listShops(
+  _request: Request,
+  response: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const result = await listPublicShops()
 
-const getShopDetails = (request: Request, response: Response): void => {
-  const shop = getShopById(request.params.shopId as string)
-
-  if (!shop) {
-    response.status(404).json({
-      error: 'Shop not found',
+    response.status(200).json({
+      ...result,
       meta: {
-        source: 'mock',
-        inventory: getInventoryBridgeMeta(),
+        ...result.meta,
+        source: 'database+inventory',
         timestamp: getTimestamp(),
       },
     })
-    return
+  } catch (error) {
+    next(error)
   }
+}
 
-  response.status(200).json({
-    item: shop,
-    meta: {
-      source: 'mock',
-      inventory: getInventoryBridgeMeta(),
-      timestamp: getTimestamp(),
-    },
-  })
+async function getShopDetails(
+  request: Request,
+  response: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const result = await getPublicShop(request.params.shopId as string)
+
+    response.status(200).json({
+      ...result,
+      meta: {
+        source: 'database+inventory',
+        timestamp: getTimestamp(),
+      },
+    })
+  } catch (error) {
+    next(error)
+  }
 }
 
 export { getShopDetails, listShops }

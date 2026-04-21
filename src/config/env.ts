@@ -26,7 +26,13 @@ const env = {
   port: parsePort(process.env.PORT, 5002),
   frontendUrl: process.env.FRONTEND_URL || defaultFrontendUrl,
   corsOrigins: parseOrigins(configuredOrigins),
-  inventoryServiceUrl: process.env.INVENTORY_SERVICE_URL || '',
+  inventoryServiceUrl:
+    process.env.INVENTORY_API_BASE_URL || process.env.INVENTORY_SERVICE_URL || '',
+  inventoryInternalToken: process.env.INVENTORY_INTERNAL_TOKEN || '',
+  inventoryRequestTimeoutMs: parseInteger(
+    process.env.INVENTORY_REQUEST_TIMEOUT_MS,
+    8000,
+  ),
   databaseUrl: process.env.DATABASE_URL || 'file:./prisma/nearcart.db',
   jwtAccessSecret: process.env.JWT_ACCESS_SECRET || 'nearcart-dev-access-secret',
   jwtAccessExpiresIn: process.env.JWT_ACCESS_EXPIRES_IN || '15m',

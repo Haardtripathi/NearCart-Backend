@@ -2,12 +2,17 @@ import type { NextFunction, Request, Response } from 'express'
 
 import {
   listOrders,
+  listInventoryOrganizations,
   listPendingShopApprovals,
   listShops,
   listUsers,
   updateShopApproval,
+  updateShopStorefront,
 } from '../services/admin.service'
-import { updateShopApprovalSchema } from '../validation/admin.validation'
+import {
+  updateShopApprovalSchema,
+  updateShopStorefrontSchema,
+} from '../validation/admin.validation'
 
 async function listUsersHandler(
   _request: Request,
@@ -69,6 +74,40 @@ async function listShopsHandler(
   }
 }
 
+async function listInventoryOrganizationsHandler(
+  request: Request,
+  response: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const result = await listInventoryOrganizations(
+      typeof request.query.search === 'string' ? request.query.search : null,
+    )
+
+    response.status(200).json(result)
+  } catch (error) {
+    next(error)
+  }
+}
+
+async function updateShopStorefrontHandler(
+  request: Request,
+  response: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const payload = updateShopStorefrontSchema.parse(request.body)
+    const result = await updateShopStorefront(
+      request.params.shopId as string,
+      payload,
+    )
+
+    response.status(200).json(result)
+  } catch (error) {
+    next(error)
+  }
+}
+
 async function listOrdersHandler(
   _request: Request,
   response: Response,
@@ -85,8 +124,10 @@ async function listOrdersHandler(
 
 export {
   listOrdersHandler,
+  listInventoryOrganizationsHandler,
   listPendingShopApprovalsHandler,
   listShopsHandler,
   listUsersHandler,
   updateShopApprovalHandler,
+  updateShopStorefrontHandler,
 }

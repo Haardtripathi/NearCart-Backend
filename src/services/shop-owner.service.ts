@@ -189,6 +189,7 @@ async function createShop(userId: string, payload: CreateShopInput) {
       name: payload.name.trim(),
       slug,
       description: normalizeOptionalString(payload.description),
+      logoImageUrl: normalizeOptionalString(payload.logoImageUrl),
       category: payload.category.trim(),
       phone: payload.phone.trim(),
       email: normalizeOptionalString(payload.email),
@@ -201,6 +202,11 @@ async function createShop(userId: string, payload: CreateShopInput) {
       longitude: payload.longitude ?? null,
       openingTime: normalizeOptionalString(payload.openingTime),
       closingTime: normalizeOptionalString(payload.closingTime),
+      deliveryEnabled: payload.deliveryEnabled ?? true,
+      minimumOrderAmount: payload.minimumOrderAmount ?? 0,
+      deliveryFeeDefault: payload.deliveryFeeDefault ?? 0,
+      estimatedDeliveryMinutes: payload.estimatedDeliveryMinutes ?? null,
+      serviceRadiusKm: payload.serviceRadiusKm ?? null,
       memberships: {
         create: {
           ownerProfileId: user.shopOwnerProfile.id,
@@ -284,6 +290,10 @@ async function updateShop(
         payload.description === undefined
           ? existingShop.description
           : normalizeOptionalString(payload.description),
+      logoImageUrl:
+        payload.logoImageUrl === undefined
+          ? existingShop.logoImageUrl
+          : normalizeOptionalString(payload.logoImageUrl),
       category: payload.category?.trim() ?? existingShop.category,
       phone: payload.phone?.trim() ?? existingShop.phone,
       email:
@@ -315,6 +325,26 @@ async function updateShop(
         payload.closingTime === undefined
           ? existingShop.closingTime
           : normalizeOptionalString(payload.closingTime),
+      deliveryEnabled:
+        payload.deliveryEnabled === undefined
+          ? existingShop.deliveryEnabled
+          : payload.deliveryEnabled,
+      minimumOrderAmount:
+        payload.minimumOrderAmount === undefined
+          ? existingShop.minimumOrderAmount
+          : payload.minimumOrderAmount,
+      deliveryFeeDefault:
+        payload.deliveryFeeDefault === undefined
+          ? existingShop.deliveryFeeDefault
+          : payload.deliveryFeeDefault,
+      estimatedDeliveryMinutes:
+        payload.estimatedDeliveryMinutes === undefined
+          ? existingShop.estimatedDeliveryMinutes
+          : payload.estimatedDeliveryMinutes,
+      serviceRadiusKm:
+        payload.serviceRadiusKm === undefined
+          ? existingShop.serviceRadiusKm
+          : payload.serviceRadiusKm,
       isActive:
         payload.isActive === undefined ? existingShop.isActive : payload.isActive,
     },

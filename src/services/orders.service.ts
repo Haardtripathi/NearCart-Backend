@@ -1,13 +1,11 @@
 import type { Prisma } from '@prisma/client'
 
 import prisma from '../lib/prisma'
+import { getAuthoritativeCheckoutSnapshot } from './public-storefront.service'
 import { createHttpError } from '../utils/httpError'
 import { mapOrder, mapOrderPreview } from '../utils/serializers'
 import { normalizeOptionalString } from '../utils/user'
-import type {
-  CheckoutItemInput,
-  CheckoutPayloadInput,
-} from '../validation/orders.validation'
+import type { CheckoutPayloadInput } from '../validation/orders.validation'
 
 interface CreateOrderOptions {
   customerUserId?: string | null
@@ -34,39 +32,6 @@ async function createOrderNumber(
   })
 
   return `NC-${datePrefix}-${String(existingOrdersCount + 1).padStart(4, '0')}`
-}
-
-function buildOrderItems(items: CheckoutItemInput[], shopId: string) {
-  const uniqueShopIds = new Set(items.map((item) => item.shopId))
-
-  if (uniqueShopIds.size !== 1 || !uniqueShopIds.has(shopId)) {
-    throw createHttpError(
-      400,
-      'All cart items must belong to the same shop as the checkout request.',
-    )
-  }
-
-  return items.map((item) => ({
-    storeProductId: item.storeProductId,
-    name: item.name,
-    brand: normalizeOptionalString(item.brand),
-    size: normalizeOptionalString(item.size),
-    image: normalizeOptionalString(item.image),
-    price: item.price,
-    mrp: item.mrp ?? null,
-    quantity: item.quantity,
-    lineTotal: item.price * item.quantity,
-  }))
-}
-
-async function resolveOrderShop(shopId: string) {
-  return prisma.shop.findFirst({
-    where: {
-      OR: [{ slug: shopId }, { id: shopId }],
-      approvalStatus: 'APPROVED',
-      isActive: true,
-    },
-  })
 }
 
 async function resolveCustomerAddress(
@@ -99,17 +64,30 @@ async function createOrder(
   payload: CheckoutPayloadInput,
   options: CreateOrderOptions = {},
 ) {
-  const orderItems = buildOrderItems(payload.items, payload.shopId)
-  const subtotal = orderItems.reduce((sum, item) => sum + item.lineTotal, 0)
   const placedAt = new Date()
   const customerAddress = await resolveCustomerAddress(
     options.customerUserId,
     normalizeOptionalString(payload.addressId),
   )
-  const shop = await resolveOrderShop(payload.shopId)
-  const deliveryFee = 0
-  const platformFee = 0
-  const totalAmount = subtotal + deliveryFee + platformFee
+  const checkoutSnapshot = await getAuthoritativeCheckoutSnapshot({
+    shopId: payload.shopId,
+    items: payload.items,
+  })
+  const { shop } = checkoutSnapshot
+
+  if (
+    shop.minimumOrderAmount > 0 &&
+    checkoutSnapshot.summary.subtotal < shop.minimumOrderAmount
+  ) {
+    throw createHttpError(
+      400,
+      `Minimum order amount for ${shop.name} is ${shop.minimumOrderAmount}.`,
+      {
+        minimumOrderAmount: shop.minimumOrderAmount,
+        subtotal: checkoutSnapshot.summary.subtotal,
+      },
+    )
+  }
 
   const createdOrder = await prisma.$transaction(async (transaction) => {
     const orderNumber = await createOrderNumber(transaction, placedAt)
@@ -118,9 +96,9 @@ async function createOrder(
       data: {
         orderNumber,
         customerUserId: options.customerUserId || null,
-        shopId: shop?.slug || payload.shopId,
-        shopRecordId: shop?.id || null,
-        shopName: shop?.name || payload.shopName.trim(),
+        shopId: shop.slug,
+        shopRecordId: shop.id,
+        shopName: shop.name,
         status: 'PENDING_CONFIRMATION',
         paymentStatus: 'PENDING',
         customerName: payload.customerName.trim(),
@@ -142,14 +120,27 @@ async function createOrder(
         longitude: customerAddress?.longitude ?? null,
         notes: normalizeOptionalString(payload.notes),
         paymentMethod: payload.paymentMethod,
-        subtotal,
-        deliveryFee,
-        platformFee,
-        totalAmount,
+        subtotal: checkoutSnapshot.summary.subtotal,
+        deliveryFee: checkoutSnapshot.summary.deliveryFee,
+        platformFee: 0,
+        totalAmount: checkoutSnapshot.summary.totalAmount,
         createdAt: placedAt,
         placedAt,
         items: {
-          create: orderItems,
+          create: checkoutSnapshot.appliedItems.map((item) => ({
+            storeProductId: item.productId,
+            inventoryProductId: item.productId,
+            inventoryVariantId: item.variantId ?? null,
+            name: item.name ?? 'Catalog item',
+            brand: item.brand?.name ?? null,
+            size: item.unitLabel ?? null,
+            unitLabel: item.unitLabel ?? null,
+            image: item.image ?? null,
+            price: item.price ?? 0,
+            mrp: item.mrp ?? null,
+            quantity: item.quantity,
+            lineTotal: (item.price ?? 0) * item.quantity,
+          })),
         },
       },
       include: {
