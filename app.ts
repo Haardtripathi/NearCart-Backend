@@ -12,7 +12,7 @@ async function startServer(): Promise<void> {
       console.log(`${env.appName} listening on port ${env.port}`)
     })
   } catch (error) {
-    console.error('Failed to start NearCart backend', error)
+    console.error('Failed to start NearKart backend', error)
     process.exit(1)
   }
 }

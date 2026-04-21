@@ -68,7 +68,7 @@ const shops: MockShop[] = [
       {
         storeProductId: 'gb-rice-5kg',
         name: 'Daily Rice',
-        brand: 'NearCart Select',
+        brand: 'NearKart Select',
         size: '5 kg',
         image:
           'https://images.unsplash.com/photo-1586201375761-83865001e31c?auto=format&fit=crop&w=800&q=80',

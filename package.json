@@ -1,7 +1,7 @@
 {
   "name": "backend",
   "version": "1.0.0",
-  "description": "NearCart main app backend foundation",
+  "description": "NearKart main app backend foundation",
   "license": "ISC",
   "author": "Haard Tripathi",
   "type": "commonjs",

@@ -21,7 +21,7 @@ app.use(morgan(env.nodeEnv === 'production' ? 'combined' : 'dev'))
 app.get('/', (_request, response) => {
   response.status(200).json({
     appName: env.appName,
-    message: 'NearCart main backend is running.',
+    message: 'NearKart main backend is running.',
   })
 })
 

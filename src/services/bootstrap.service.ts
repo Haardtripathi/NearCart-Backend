@@ -18,7 +18,7 @@ async function ensureBootstrapAdmin() {
   if (existingUser) {
     if (existingUser.role !== 'ADMIN') {
       console.warn(
-        `[NearCart] Admin bootstrap skipped because ${email} already exists as ${existingUser.role}.`,
+        `[NearKart] Admin bootstrap skipped because ${email} already exists as ${existingUser.role}.`,
       )
     }
 
@@ -38,7 +38,7 @@ async function ensureBootstrapAdmin() {
     },
   })
 
-  console.log(`[NearCart] Bootstrapped admin account for ${email}.`)
+  console.log(`[NearKart] Bootstrapped admin account for ${email}.`)
 
   return adminUser
 }
