@@ -1,14 +1,20 @@
-import type { Prisma } from '@prisma/client'
+import type { Prisma, UserRole } from '@prisma/client'
 
 import prisma from '../lib/prisma'
 import { getAuthoritativeCheckoutSnapshot } from './public-storefront.service'
 import { createHttpError } from '../utils/httpError'
-import { mapOrder, mapOrderPreview } from '../utils/serializers'
+import { mapOrder } from '../utils/serializers'
 import { normalizeOptionalString } from '../utils/user'
 import type { CheckoutPayloadInput } from '../validation/orders.validation'
 
 interface CreateOrderOptions {
-  customerUserId?: string | null
+  customerUserId: string
+}
+
+interface OrderAccessContext {
+  userId: string
+  role: UserRole
+  shopOwnerProfileId?: string | null
 }
 
 async function createOrderNumber(
@@ -35,15 +41,11 @@ async function createOrderNumber(
 }
 
 async function resolveCustomerAddress(
-  customerUserId: string | null | undefined,
+  customerUserId: string,
   addressId: string | null,
 ) {
   if (!addressId) {
     return null
-  }
-
-  if (!customerUserId) {
-    throw createHttpError(400, 'Saved addresses can only be used by signed-in customers')
   }
 
   const address = await prisma.address.findFirst({
@@ -62,7 +64,7 @@ async function resolveCustomerAddress(
 
 async function createOrder(
   payload: CheckoutPayloadInput,
-  options: CreateOrderOptions = {},
+  options: CreateOrderOptions,
 ) {
   const placedAt = new Date()
   const customerAddress = await resolveCustomerAddress(
@@ -95,7 +97,7 @@ async function createOrder(
     return transaction.order.create({
       data: {
         orderNumber,
-        customerUserId: options.customerUserId || null,
+        customerUserId: options.customerUserId,
         shopId: shop.slug,
         shopRecordId: shop.id,
         shopName: shop.name,
@@ -152,11 +154,12 @@ async function createOrder(
   return mapOrder(createdOrder)
 }
 
-async function getOrderById(orderId: string) {
+async function getOrderById(orderId: string, accessContext: OrderAccessContext) {
   const order = await prisma.order.findUnique({
     where: { id: orderId },
     include: {
       items: true,
+      shop: true,
     },
   })
 
@@ -164,18 +167,19 @@ async function getOrderById(orderId: string) {
     throw createHttpError(404, 'Order not found')
   }
 
+  const canViewOrder =
+    accessContext.role === 'ADMIN' ||
+    (accessContext.role === 'CUSTOMER' &&
+      order.customerUserId === accessContext.userId) ||
+    (accessContext.role === 'SHOP_OWNER' &&
+      Boolean(accessContext.shopOwnerProfileId) &&
+      order.shop?.ownerProfileId === accessContext.shopOwnerProfileId)
+
+  if (!canViewOrder) {
+    throw createHttpError(404, 'Order not found')
+  }
+
   return mapOrder(order)
 }
 
-async function listOrders() {
-  const orders = await prisma.order.findMany({
-    orderBy: {
-      createdAt: 'desc',
-    },
-    take: 20,
-  })
-
-  return orders.map(mapOrderPreview)
-}
-
-export { createOrder, getOrderById, listOrders }
+export { createOrder, getOrderById }

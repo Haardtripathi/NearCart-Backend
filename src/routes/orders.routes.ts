@@ -3,14 +3,12 @@ import { Router } from 'express'
 import {
   createOrderHandler,
   getOrderByIdHandler,
-  listOrdersHandler,
 } from '../controllers/orders.controller'
-import { optionalAuth } from '../middleware/auth'
+import { requireAuth, requireRole } from '../middleware/auth'
 
 const router = Router()
 
-router.post('/orders', optionalAuth, createOrderHandler)
-router.get('/orders', listOrdersHandler)
-router.get('/orders/:orderId', getOrderByIdHandler)
+router.post('/orders', requireAuth, requireRole('CUSTOMER'), createOrderHandler)
+router.get('/orders/:orderId', requireAuth, getOrderByIdHandler)
 
 export default router

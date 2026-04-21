@@ -1,7 +1,11 @@
 const parsePort = (value: string | undefined, fallback: number): number => {
   const parsedValue = Number.parseInt(value ?? '', 10)
 
-  return Number.isNaN(parsedValue) ? fallback : parsedValue
+  if (Number.isNaN(parsedValue) || parsedValue <= 0 || parsedValue > 65535) {
+    return fallback
+  }
+
+  return parsedValue
 }
 
 const parseInteger = (value: string | undefined, fallback: number): number => {
@@ -16,16 +20,47 @@ const parseOrigins = (value: string): string[] =>
     .map((origin) => origin.trim())
     .filter(Boolean)
 
+function assertProductionSecret(name: string, value: string): void {
+  if (process.env.NODE_ENV !== 'production') {
+    return
+  }
+
+  const weakDevelopmentValues = new Set([
+    '',
+    'change-me-to-a-long-random-secret',
+    'nearkart-dev-access-secret',
+  ])
+
+  if (weakDevelopmentValues.has(value) || value.length < 32) {
+    throw new Error(`${name} must be configured with a strong production secret`)
+  }
+}
+
+function assertProductionRequired(name: string, value: string): void {
+  if (process.env.NODE_ENV === 'production' && !value) {
+    throw new Error(`${name} must be configured in production`)
+  }
+}
+
 const defaultFrontendUrl = 'http://localhost:5173'
+const defaultDatabaseUrl = 'file:./prisma/nearkart.db'
 const configuredOrigins =
   process.env.CORS_ORIGIN || process.env.FRONTEND_URL || defaultFrontendUrl
+const nodeEnv = process.env.NODE_ENV || 'development'
+const databaseUrl = process.env.DATABASE_URL || defaultDatabaseUrl
+const jwtAccessSecret =
+  process.env.JWT_ACCESS_SECRET || 'nearkart-dev-access-secret'
+
+assertProductionRequired('DATABASE_URL', process.env.DATABASE_URL || '')
+assertProductionSecret('JWT_ACCESS_SECRET', jwtAccessSecret)
 
 const env = {
   appName: process.env.APP_NAME || 'NearKart Main App',
-  nodeEnv: process.env.NODE_ENV || 'development',
+  nodeEnv,
   port: parsePort(process.env.PORT, 5002),
   frontendUrl: process.env.FRONTEND_URL || defaultFrontendUrl,
   corsOrigins: parseOrigins(configuredOrigins),
+  requestBodyLimit: process.env.REQUEST_BODY_LIMIT || '1mb',
   inventoryServiceUrl:
     process.env.INVENTORY_API_BASE_URL || process.env.INVENTORY_SERVICE_URL || '',
   inventoryInternalToken: process.env.INVENTORY_INTERNAL_TOKEN || '',
@@ -33,8 +68,8 @@ const env = {
     process.env.INVENTORY_REQUEST_TIMEOUT_MS,
     8000,
   ),
-  databaseUrl: process.env.DATABASE_URL || 'file:./prisma/nearkart.db',
-  jwtAccessSecret: process.env.JWT_ACCESS_SECRET || 'nearkart-dev-access-secret',
+  databaseUrl,
+  jwtAccessSecret,
   jwtAccessExpiresIn: process.env.JWT_ACCESS_EXPIRES_IN || '15m',
   refreshTokenTtlDays: parseInteger(process.env.AUTH_REFRESH_TTL_DAYS, 30),
   authRefreshCookieName:
@@ -43,6 +78,9 @@ const env = {
   adminBootstrapPassword: process.env.ADMIN_BOOTSTRAP_PASSWORD || '',
   adminBootstrapFullName:
     process.env.ADMIN_BOOTSTRAP_FULL_NAME || 'NearKart Platform Admin',
+  otpProvider: process.env.OTP_PROVIDER || '',
+  otpSenderId: process.env.OTP_SENDER_ID || '',
+  otpApiKey: process.env.OTP_API_KEY || '',
 }
 
 export default env

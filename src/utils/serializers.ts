@@ -11,7 +11,7 @@ import type {
 import { getDashboardPathForRole } from './user'
 
 type SafeUserSource = User & {
-  customerProfile?: Pick<CustomerProfile, 'id' | 'defaultAddressId'> | null
+  customerProfile?: (Pick<CustomerProfile, 'id' | 'defaultAddressId'> & { defaultAddress?: Address | null }) | null
   shopOwnerProfile?: Pick<ShopOwnerProfile, 'id' | 'isApproved'> | null
 }
 

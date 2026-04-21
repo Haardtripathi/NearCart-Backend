@@ -18,16 +18,10 @@ function getBearerToken(request: Request): string | null {
 
 async function resolveAuthenticatedUser(
   request: Request,
-  isOptional: boolean,
 ): Promise<Express.Request['auth']> {
   const token = getBearerToken(request)
 
   if (!token) {
-    if (isOptional) {
-      request.auth = null
-      return null
-    }
-
     throw createHttpError(401, 'Authentication required')
   }
 
@@ -36,11 +30,6 @@ async function resolveAuthenticatedUser(
   try {
     payload = verifyAccessToken(token)
   } catch {
-    if (isOptional) {
-      request.auth = null
-      return null
-    }
-
     throw createHttpError(401, 'Invalid or expired access token')
   }
 
@@ -52,11 +41,6 @@ async function resolveAuthenticatedUser(
   })
 
   if (!user || !user.isActive) {
-    if (isOptional) {
-      request.auth = null
-      return null
-    }
-
     throw createHttpError(401, 'Your session is no longer active')
   }
 
@@ -71,16 +55,7 @@ async function resolveAuthenticatedUser(
 
 const requireAuth: RequestHandler = async (request, _response, next) => {
   try {
-    await resolveAuthenticatedUser(request, false)
-    next()
-  } catch (error) {
-    next(error)
-  }
-}
-
-const optionalAuth: RequestHandler = async (request, _response, next) => {
-  try {
-    await resolveAuthenticatedUser(request, true)
+    await resolveAuthenticatedUser(request)
     next()
   } catch (error) {
     next(error)
@@ -103,4 +78,4 @@ function requireRole(...roles: UserRole[]): RequestHandler {
   }
 }
 
-export { optionalAuth, requireAuth, requireRole }
+export { requireAuth, requireRole }

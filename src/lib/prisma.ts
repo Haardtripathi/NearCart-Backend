@@ -1,17 +1,18 @@
 import { PrismaLibSql } from '@prisma/adapter-libsql'
 import { PrismaClient } from '@prisma/client'
 
+import env from '../config/env'
+
 const globalForPrisma = globalThis as typeof globalThis & {
   __nearkartPrisma?: PrismaClient
 }
-const databaseUrl = process.env.DATABASE_URL || 'file:./prisma/nearkart.db'
 
 function createPrismaClient(): PrismaClient {
-  const adapter = new PrismaLibSql({ url: databaseUrl })
+  const adapter = new PrismaLibSql({ url: env.databaseUrl })
 
   return new PrismaClient({
     adapter,
-    log: process.env.NODE_ENV === 'development' ? ['warn', 'error'] : ['error'],
+    log: env.nodeEnv === 'development' ? ['warn', 'error'] : ['error'],
   })
 }
 
@@ -19,7 +20,7 @@ const prisma =
   globalForPrisma.__nearkartPrisma ||
   createPrismaClient()
 
-if (process.env.NODE_ENV !== 'production') {
+if (env.nodeEnv !== 'production') {
   globalForPrisma.__nearkartPrisma = prisma
 }
 

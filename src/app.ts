@@ -15,7 +15,8 @@ app.disable('x-powered-by')
 
 app.use(helmet())
 app.use(cors(corsOptions))
-app.use(express.json())
+app.use(express.json({ limit: env.requestBodyLimit }))
+app.use(express.urlencoded({ extended: true, limit: env.requestBodyLimit }))
 app.use(morgan(env.nodeEnv === 'production' ? 'combined' : 'dev'))
 
 app.get('/', (_request, response) => {
