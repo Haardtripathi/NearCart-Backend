@@ -40,6 +40,11 @@ type OrderItemSource = OrderItem & {
 
 type OrderSource = Order & {
   items?: OrderItemSource[] | null
+  inventorySalesOrderId?: string | null
+  inventorySalesOrderNumber?: string | null
+  inventorySyncStatus?: string | null
+  inventorySyncError?: string | null
+  inventoryLastSyncedAt?: Date | null
 }
 
 function mapAddress(address: Address) {
@@ -194,6 +199,11 @@ function mapOrder(order: OrderSource) {
     placedAt: order.placedAt,
     acceptedAt: order.acceptedAt,
     deliveredAt: order.deliveredAt,
+    inventorySalesOrderId: order.inventorySalesOrderId ?? null,
+    inventorySalesOrderNumber: order.inventorySalesOrderNumber ?? null,
+    inventorySyncStatus: order.inventorySyncStatus ?? null,
+    inventorySyncError: order.inventorySyncError ?? null,
+    inventoryLastSyncedAt: order.inventoryLastSyncedAt ?? null,
     createdAt: order.createdAt,
     updatedAt: order.updatedAt,
     items: Array.isArray(order.items) ? order.items.map(mapOrderItem) : [],

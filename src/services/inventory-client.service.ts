@@ -355,12 +355,100 @@ async function checkInventoryAvailability(input: {
   )
 }
 
+interface PushSalesOrderInput {
+  organizationId: string
+  branchId: string
+  externalOrderId: string
+  externalOrderNumber?: string | null
+  customer: {
+    name: string
+    phone: string
+    addressLine?: string | null
+    latitude?: number | null
+    longitude?: number | null
+  }
+  items: Array<{
+    inventoryProductId: string
+    inventoryVariantId?: string | null
+    quantity: number
+    unitPrice: number
+  }>
+  notes?: string | null
+}
+
+interface PushSalesOrderResponse {
+  salesOrderId: string
+  orderNumber: string
+  status: string
+}
+
+interface InventorySalesOrderStatusResponse {
+  salesOrderId: string
+  orderNumber: string
+  status: string
+  rejectionReason?: string | null
+  confirmedAt?: string | null
+  deliveredAt?: string | null
+}
+
+// NOTE ON PATH PREFIX: the bridge contract this was built against
+// (see NearCart CLAUDE.md / PHASE1_REQUIREMENTS.md) specifies bare paths
+// `/organizations/:organizationId/sales-orders` and
+// `/sales-orders/by-external/:externalOrderId`. Every other marketplace
+// bridge endpoint in NearCart-Inventory lives under the
+// `/api/internal/marketplace` prefix behind `requireInternalServiceAuth`
+// (see that repo's `routes/index.ts`), so these calls are namespaced the
+// same way for consistency — adjust this prefix if the real implementation
+// (being built in parallel) mounts them elsewhere.
+const MARKETPLACE_BRIDGE_PREFIX = '/api/internal/marketplace'
+
+/**
+ * Pushes a NearCart `Order` into NearCart-Inventory as a `SalesOrder`
+ * (source=APP). Intentionally does not throw on the caller's behalf in a
+ * way that should abort order creation — callers should catch failures and
+ * let the local order persist regardless (see `orders.service.ts`).
+ */
+async function pushSalesOrderToInventory(
+  input: PushSalesOrderInput,
+): Promise<PushSalesOrderResponse> {
+  return inventoryRequest<PushSalesOrderResponse>(
+    `${MARKETPLACE_BRIDGE_PREFIX}/organizations/${input.organizationId}/sales-orders`,
+    {
+      method: 'POST',
+      body: {
+        branchId: input.branchId,
+        externalOrderId: input.externalOrderId,
+        externalOrderNumber: input.externalOrderNumber ?? undefined,
+        customer: input.customer,
+        items: input.items,
+        notes: input.notes ?? undefined,
+      },
+    },
+  )
+}
+
+/**
+ * Reads back the current status of a previously-pushed SalesOrder by this
+ * app's own Order id, so `NearCart` can reflect shop-owner actions
+ * (confirm/reject/ready/out-for-delivery/deliver) taken in the Inventory
+ * dashboard.
+ */
+async function getInventorySalesOrderStatus(
+  externalOrderId: string,
+): Promise<InventorySalesOrderStatusResponse> {
+  return inventoryRequest<InventorySalesOrderStatusResponse>(
+    `${MARKETPLACE_BRIDGE_PREFIX}/sales-orders/by-external/${externalOrderId}`,
+  )
+}
+
 export {
   checkInventoryAvailability,
   getInventoryBridgeMeta,
   getInventoryCatalogProduct,
+  getInventorySalesOrderStatus,
   listInventoryCatalog,
   listInventoryMarketplaceOrganizations,
+  pushSalesOrderToInventory,
 }
 
 export type {
@@ -370,4 +458,7 @@ export type {
   InventoryCatalogProductResponse,
   InventoryCatalogResponse,
   InventoryMarketplaceOption,
+  InventorySalesOrderStatusResponse,
+  PushSalesOrderInput,
+  PushSalesOrderResponse,
 }

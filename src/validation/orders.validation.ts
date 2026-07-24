@@ -18,6 +18,12 @@ const checkoutPayloadSchema = z.object({
   area: z.string().trim().optional().default(''),
   pincode: z.string().trim().min(1, 'Pincode is required'),
   landmark: z.string().trim().optional().default(''),
+  // Only used when addressId is not provided (an ad-hoc, not-yet-saved
+  // delivery address) — lets service-area gating still run for that case.
+  // Ignored when a saved addressId is supplied (that address's own
+  // latitude/longitude is used instead).
+  latitude: z.number().min(-90).max(90).optional(),
+  longitude: z.number().min(-180).max(180).optional(),
   notes: z.string().trim().optional().default(''),
   paymentMethod: z.enum(['COD', 'ONLINE', 'PAY_ON_PICKUP']),
   items: z

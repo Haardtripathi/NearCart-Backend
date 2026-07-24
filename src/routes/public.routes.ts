@@ -7,8 +7,11 @@ import {
   listPublicShopsHandler,
   validatePublicCartHandler,
 } from '../controllers/public.controller'
+import { publicApiRateLimiter } from '../middleware/rateLimit'
 
 const router = Router()
+
+router.use(publicApiRateLimiter)
 
 router.get('/public/shops', listPublicShopsHandler)
 router.get('/public/shops/:shopIdOrSlug', getPublicShopHandler)

@@ -81,6 +81,22 @@ const env = {
   otpProvider: process.env.OTP_PROVIDER || '',
   otpSenderId: process.env.OTP_SENDER_ID || '',
   otpApiKey: process.env.OTP_API_KEY || '',
+  otpTtlSeconds: parseInteger(process.env.OTP_TTL_SECONDS, 600),
+  otpResendCooldownSeconds: parseInteger(
+    process.env.OTP_RESEND_COOLDOWN_SECONDS,
+    60,
+  ),
+  otpMaxVerifyAttempts: parseInteger(process.env.OTP_MAX_VERIFY_ATTEMPTS, 5),
+  redisUrl: process.env.REDIS_URL || '',
+  smtpHost: process.env.SMTP_HOST || '',
+  smtpPort: parsePort(process.env.SMTP_PORT, 587),
+  smtpUser: process.env.SMTP_USER || '',
+  smtpPass: process.env.SMTP_PASS || '',
+  smtpFrom: process.env.SMTP_FROM || 'NearKart <no-reply@nearkart.local>',
+  smtpSecure: process.env.SMTP_SECURE === 'true',
+  googleMapsApiKey: process.env.GOOGLE_MAPS_API_KEY || '',
+  defaultServiceRadiusKm:
+    Number.parseFloat(process.env.DEFAULT_SERVICE_RADIUS_KM || '') || 10,
 }
 
 export default env
