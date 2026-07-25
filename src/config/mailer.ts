@@ -1,6 +1,7 @@
 import nodemailer, { type Transporter } from 'nodemailer'
 
 import env from './env'
+import { createHttpError } from '../utils/httpError'
 
 let transporter: Transporter | null | undefined
 
@@ -61,13 +62,21 @@ async function sendMail(input: SendMailInput): Promise<{ delivered: boolean }> {
     return { delivered: false }
   }
 
-  await mailer.sendMail({
-    from: env.smtpFrom,
-    to: input.to,
-    subject: input.subject,
-    text: input.text,
-    html: input.html,
-  })
+  try {
+    await mailer.sendMail({
+      from: env.smtpFrom,
+      to: input.to,
+      subject: input.subject,
+      text: input.text,
+      html: input.html,
+    })
+  } catch (error) {
+    // nodemailer/SMTP errors can include transport details (host, auth
+    // failure reasons) that must not be forwarded to the client verbatim —
+    // log server-side and surface a clean, generic error instead.
+    console.error('[NearKart] Failed to send email via SMTP:', error)
+    throw createHttpError(502, 'Failed to send email. Please try again shortly.')
+  }
 
   return { delivered: true }
 }
