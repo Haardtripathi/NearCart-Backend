@@ -97,6 +97,22 @@ const env = {
   googleMapsApiKey: process.env.GOOGLE_MAPS_API_KEY || '',
   defaultServiceRadiusKm:
     Number.parseFloat(process.env.DEFAULT_SERVICE_RADIUS_KM || '') || 10,
+  // Number of reverse-proxy hops Express should trust when deriving the
+  // client IP from X-Forwarded-For (e.g. 1 behind a single nginx/Render/
+  // Railway/Heroku-style proxy). Defaults to 1 in production — nearly every
+  // real deployment sits behind at least one proxy/load balancer — and 0
+  // (no proxy trusted) in development, where requests normally arrive
+  // directly. This MUST be set correctly for express-rate-limit: without
+  // it, any request carrying an X-Forwarded-For header (which any proxy
+  // adds) makes express-rate-limit throw ERR_ERL_UNEXPECTED_X_FORWARDED_FOR
+  // on every rate-limited route (register/login/orders/otp/public/location),
+  // and even if that didn't throw, req.ip would resolve to the proxy's IP
+  // for every request, collapsing per-IP rate limiting into one shared
+  // bucket for all users.
+  trustProxyHops: parseInteger(
+    process.env.TRUST_PROXY_HOPS,
+    nodeEnv === 'production' ? 1 : 0,
+  ),
 }
 
 export default env

@@ -12,6 +12,10 @@ import apiRoutes from './routes'
 const app = express()
 
 app.disable('x-powered-by')
+// Required for express-rate-limit (and req.ip generally) to correctly
+// identify clients behind a reverse proxy — see env.trustProxyHops for why
+// this is not optional once rate limiting is in play.
+app.set('trust proxy', env.trustProxyHops)
 
 app.use(helmet())
 app.use(cors(corsOptions))
