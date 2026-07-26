@@ -16,6 +16,24 @@ const shopGeoQuerySchema = z.object({
   lng: z.coerce.number().min(-180).max(180).optional(),
 })
 
+const shopListQuerySchema = shopGeoQuerySchema.extend({
+  search: optionalTrimmedString,
+  category: optionalTrimmedString,
+})
+
+const publicSearchQuerySchema = z.object({
+  q: z.string().trim().min(2, 'Search query must be at least 2 characters'),
+  category: optionalTrimmedString,
+  limit: z.coerce.number().int().min(1).max(60).default(24),
+  lang: optionalTrimmedString,
+})
+
+const publicTrendingQuerySchema = z.object({
+  category: optionalTrimmedString,
+  limit: z.coerce.number().int().min(1).max(40).default(20),
+  lang: optionalTrimmedString,
+})
+
 const shopCatalogQuerySchema = z.object({
   search: optionalTrimmedString,
   category: optionalTrimmedString,
@@ -51,17 +69,26 @@ type ShopCatalogQueryInput = z.infer<typeof shopCatalogQuerySchema>
 type CartValidationItemInput = z.infer<typeof cartValidationItemSchema>
 type PublicCartValidationInput = z.infer<typeof publicCartValidationSchema>
 type ShopGeoQueryInput = z.infer<typeof shopGeoQuerySchema>
+type ShopListQueryInput = z.infer<typeof shopListQuerySchema>
+type PublicSearchQueryInput = z.infer<typeof publicSearchQuerySchema>
+type PublicTrendingQueryInput = z.infer<typeof publicTrendingQuerySchema>
 
 export {
   cartValidationItemSchema,
   publicCartValidationSchema,
+  publicSearchQuerySchema,
+  publicTrendingQuerySchema,
   shopCatalogQuerySchema,
   shopGeoQuerySchema,
+  shopListQuerySchema,
 }
 
 export type {
   CartValidationItemInput,
   PublicCartValidationInput,
+  PublicSearchQueryInput,
+  PublicTrendingQueryInput,
   ShopCatalogQueryInput,
   ShopGeoQueryInput,
+  ShopListQueryInput,
 }

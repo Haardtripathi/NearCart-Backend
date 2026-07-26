@@ -4,7 +4,10 @@ import {
   getPublicCatalogProductHandler,
   getPublicShopHandler,
   listPublicShopCatalogHandler,
+  listPublicShopCategoriesHandler,
   listPublicShopsHandler,
+  listTrendingProductsHandler,
+  searchPublicCatalogHandler,
   validatePublicCartHandler,
 } from '../controllers/public.controller'
 import { publicApiRateLimiter } from '../middleware/rateLimit'
@@ -13,6 +16,9 @@ const router = Router()
 
 router.use(publicApiRateLimiter)
 
+router.get('/public/categories', listPublicShopCategoriesHandler)
+router.get('/public/search', searchPublicCatalogHandler)
+router.get('/public/trending', listTrendingProductsHandler)
 router.get('/public/shops', listPublicShopsHandler)
 router.get('/public/shops/:shopIdOrSlug', getPublicShopHandler)
 router.get('/public/shops/:shopIdOrSlug/catalog', listPublicShopCatalogHandler)

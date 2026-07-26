@@ -9,6 +9,7 @@ import {
   listInventoryMarketplaceOrganizations,
   type InventoryAvailabilityResponse,
   type InventoryCatalogItem,
+  type InventoryCatalogResponse,
 } from './inventory-client.service'
 import { createHttpError } from '../utils/httpError'
 import type {
@@ -27,6 +28,25 @@ const PUBLIC_SHOP_WHERE = {
   isActive: true,
   publicCatalogEnabled: true,
 }
+
+// Shared with listPublicShops and the search/trending fan-out below — a shop is only
+// eligible for any customer-facing browsing surface once it's both approved/active/
+// storefront-enabled AND actually mapped to a live inventory org+branch (getMappedPublicShop
+// enforces the same pair of conditions one-shop-at-a-time via a 409; this is the list-level
+// equivalent so unmapped shops never appear as fan-out candidates in the first place).
+const PUBLIC_MAPPED_SHOP_WHERE = {
+  ...PUBLIC_SHOP_WHERE,
+  inventoryOrganizationId: { not: null },
+  inventoryBranchId: { not: null },
+}
+
+// v1 bounded-fan-out tuning — see searchPublicCatalog/listTrendingProducts. No cross-shop
+// search index exists; this trades completeness for a hard ceiling on concurrent outbound
+// calls to the NearCart-Inventory bridge per customer request.
+const SEARCH_FANOUT_SHOP_CAP = 15
+const SEARCH_PER_SHOP_RESULT_CAP = 8
+const TRENDING_FANOUT_SHOP_CAP = 10
+const TRENDING_PER_SHOP_RESULT_CAP = 6
 
 function parseTimeToMinutes(value: string | null | undefined): number | null {
   if (!value) {
@@ -348,16 +368,19 @@ async function buildValidatedCartSnapshot(
   }
 }
 
-async function listPublicShops(customerCoordinates?: CustomerCoordinates | null) {
+async function listPublicShops(
+  customerCoordinates?: CustomerCoordinates | null,
+  filters?: { search?: string | null; category?: string | null },
+) {
   const shops = await prisma.shop.findMany({
     where: {
-      ...PUBLIC_SHOP_WHERE,
-      inventoryOrganizationId: {
-        not: null,
-      },
-      inventoryBranchId: {
-        not: null,
-      },
+      ...PUBLIC_MAPPED_SHOP_WHERE,
+      // Plain `contains`, deliberately no `mode: 'insensitive'` — this schema's datasource is
+      // sqlite (see prisma/schema.prisma), which throws a PrismaClientValidationError on that
+      // filter (postgres/mysql-only). SQLite's LIKE is already ASCII-case-insensitive, which
+      // covers the realistic case of English shop names without it.
+      ...(filters?.search ? { name: { contains: filters.search } } : {}),
+      ...(filters?.category ? { category: filters.category } : {}),
     },
     orderBy: [{ createdAt: 'desc' }, { name: 'asc' }],
   })
@@ -372,6 +395,183 @@ async function listPublicShops(customerCoordinates?: CustomerCoordinates | null)
     items,
     meta: {
       total: shops.length,
+    },
+  }
+}
+
+// Cheap local aggregation over the flat Shop.category string (shop-type: "Grocery",
+// "Pharmacy", ...) — deliberately NOT the deeper per-shop product-category system from the
+// inventory bridge (that stays scoped to listPublicShopCatalog's `filters.categories`, unchanged).
+// Powers a home-page "browse by shop type" strip, Swiggy/Blinkit-style.
+async function listPublicShopCategories() {
+  const grouped = await prisma.shop.groupBy({
+    by: ['category'],
+    where: PUBLIC_MAPPED_SHOP_WHERE,
+    _count: { category: true },
+    orderBy: { _count: { category: 'desc' } },
+  })
+
+  return {
+    items: grouped.map((row) => ({
+      category: row.category,
+      shopCount: row._count.category,
+    })),
+  }
+}
+
+async function fetchCandidateShops(
+  filters: { category?: string | null } | undefined,
+  take: number,
+): Promise<Shop[]> {
+  return prisma.shop.findMany({
+    where: {
+      ...PUBLIC_MAPPED_SHOP_WHERE,
+      ...(filters?.category ? { category: filters.category } : {}),
+    },
+    orderBy: [{ createdAt: 'desc' }, { name: 'asc' }],
+    take,
+  })
+}
+
+interface FannedOutShopCatalog {
+  shop: Shop
+  items: InventoryCatalogItem[]
+}
+
+// Queries N shops' inventory-bridge catalogs in parallel and keeps only the ones that
+// answered. Promise.allSettled (not Promise.all) is deliberate: this hits N independent
+// remote services, and one shop's bridge being slow/down must not fail the whole request.
+async function fanOutCatalogAcrossShops(
+  shops: Shop[],
+  buildParams: (shop: Shop) => Parameters<typeof listInventoryCatalog>[0],
+): Promise<FannedOutShopCatalog[]> {
+  const settled = await Promise.allSettled(
+    shops.map(async (shop) => ({
+      shop,
+      catalog: await listInventoryCatalog(buildParams(shop)),
+    })),
+  )
+
+  return settled
+    .filter(
+      (
+        result,
+      ): result is PromiseFulfilledResult<{
+        shop: Shop
+        catalog: InventoryCatalogResponse
+      }> => result.status === 'fulfilled',
+    )
+    .map((result) => ({ shop: result.value.shop, items: result.value.catalog.items }))
+}
+
+// Round-robin interleave across shop groups (take item 0 from every shop, then item 1 from
+// every shop, ...) rather than concatenating, so results aren't dominated by whichever shop
+// happens to have the largest catalog.
+function interleaveShopResults(
+  groups: FannedOutShopCatalog[],
+  limit: number,
+): Array<{ shop: Shop; item: InventoryCatalogItem }> {
+  const merged: Array<{ shop: Shop; item: InventoryCatalogItem }> = []
+  let index = 0
+  let addedInLastPass = true
+
+  while (merged.length < limit && addedInLastPass) {
+    addedInLastPass = false
+
+    for (const group of groups) {
+      if (merged.length >= limit) {
+        break
+      }
+
+      const item = group.items[index]
+
+      if (item) {
+        merged.push({ shop: group.shop, item })
+        addedInLastPass = true
+      }
+    }
+
+    index += 1
+  }
+
+  return merged
+}
+
+function mapCatalogItemForSearchResult(shop: Shop, item: InventoryCatalogItem) {
+  return {
+    ...mapCatalogItemForPublicApi(item),
+    shop: mapPublicShopSummary(shop),
+  }
+}
+
+// v1 cross-shop search — a bounded parallel fan-out over the existing per-shop catalog
+// endpoint, not real search infrastructure (no cross-shop index exists). `meta.strategy`
+// documents this in the API response itself, not just here, so it isn't mistaken for
+// something more sophisticated later. `category` here filters candidate *shops* by
+// Shop.category (shop-type), not product category — easy to misread, so stated explicitly.
+async function searchPublicCatalog(
+  query: string,
+  options?: { category?: string | null; limit?: number; language?: string | null },
+) {
+  const limit = options?.limit ?? 24
+  const candidateShops = await fetchCandidateShops(
+    { category: options?.category },
+    SEARCH_FANOUT_SHOP_CAP,
+  )
+  const groups = await fanOutCatalogAcrossShops(candidateShops, (shop) => ({
+    organizationId: shop.inventoryOrganizationId!,
+    branchId: shop.inventoryBranchId!,
+    search: query,
+    inStockOnly: true,
+    sort: 'featured',
+    page: 1,
+    limit: SEARCH_PER_SHOP_RESULT_CAP,
+    language: options?.language,
+  }))
+  const merged = interleaveShopResults(groups, limit)
+
+  return {
+    items: merged.map(({ shop, item }) => mapCatalogItemForSearchResult(shop, item)),
+    meta: {
+      query,
+      shopsSearched: candidateShops.length,
+      shopsSucceeded: groups.length,
+      shopsFailed: candidateShops.length - groups.length,
+      strategy: 'bounded-parallel-fanout-v1',
+    },
+  }
+}
+
+// v1 "trending" — no analytics/order-count table exists anywhere in this schema, so this is
+// explicitly featured, in-stock items from a capped set of shops, NOT a real popularity
+// ranking. `meta.strategy` says so in the response itself.
+async function listTrendingProducts(options?: {
+  category?: string | null
+  limit?: number
+  language?: string | null
+}) {
+  const limit = options?.limit ?? 20
+  const candidateShops = await fetchCandidateShops(
+    { category: options?.category },
+    TRENDING_FANOUT_SHOP_CAP,
+  )
+  const groups = await fanOutCatalogAcrossShops(candidateShops, (shop) => ({
+    organizationId: shop.inventoryOrganizationId!,
+    branchId: shop.inventoryBranchId!,
+    inStockOnly: true,
+    sort: 'featured',
+    page: 1,
+    limit: TRENDING_PER_SHOP_RESULT_CAP,
+    language: options?.language,
+  }))
+  const merged = interleaveShopResults(groups, limit)
+
+  return {
+    items: merged.map(({ shop, item }) => mapCatalogItemForSearchResult(shop, item)),
+    meta: {
+      shopsQueried: candidateShops.length,
+      shopsSucceeded: groups.length,
+      strategy: 'featured-fanout-v1-not-real-trending',
     },
   }
 }
@@ -514,6 +714,9 @@ export {
   getPublicShop,
   listInventoryMappingOptions,
   listPublicShopCatalog,
+  listPublicShopCategories,
   listPublicShops,
+  listTrendingProducts,
+  searchPublicCatalog,
   validatePublicCart,
 }
