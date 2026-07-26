@@ -6,6 +6,16 @@ const optionalTrimmedString = z
   .optional()
   .or(z.literal(''))
 
+// Optional ad-hoc customer coordinates, used server-side (only) to compute
+// the live delivery-ETA distance term — see `delivery-eta.service.ts` /
+// `attachLiveEta` in `public-storefront.service.ts`. Anonymous browsing
+// (no address chosen yet) omits these and the ETA falls back to a
+// distance-free estimate rather than erroring.
+const shopGeoQuerySchema = z.object({
+  lat: z.coerce.number().min(-90).max(90).optional(),
+  lng: z.coerce.number().min(-180).max(180).optional(),
+})
+
 const shopCatalogQuerySchema = z.object({
   search: optionalTrimmedString,
   category: optionalTrimmedString,
@@ -17,6 +27,8 @@ const shopCatalogQuerySchema = z.object({
     .enum(['featured', 'name-asc', 'price-asc', 'price-desc', 'newest'])
     .default('featured'),
   lang: optionalTrimmedString,
+  lat: z.coerce.number().min(-90).max(90).optional(),
+  lng: z.coerce.number().min(-180).max(180).optional(),
 })
 
 const cartValidationItemSchema = z.object({
@@ -38,15 +50,18 @@ const publicCartValidationSchema = z.object({
 type ShopCatalogQueryInput = z.infer<typeof shopCatalogQuerySchema>
 type CartValidationItemInput = z.infer<typeof cartValidationItemSchema>
 type PublicCartValidationInput = z.infer<typeof publicCartValidationSchema>
+type ShopGeoQueryInput = z.infer<typeof shopGeoQuerySchema>
 
 export {
   cartValidationItemSchema,
   publicCartValidationSchema,
   shopCatalogQuerySchema,
+  shopGeoQuerySchema,
 }
 
 export type {
   CartValidationItemInput,
   PublicCartValidationInput,
   ShopCatalogQueryInput,
+  ShopGeoQueryInput,
 }

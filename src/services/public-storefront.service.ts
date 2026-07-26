@@ -1,6 +1,7 @@
 import type { Shop } from '@prisma/client'
 
 import prisma from '../lib/prisma'
+import { getDeliveryEtaMinutes } from './delivery-eta.service'
 import {
   checkInventoryAvailability,
   getInventoryCatalogProduct,
@@ -15,6 +16,11 @@ import type {
   PublicCartValidationInput,
   ShopCatalogQueryInput,
 } from '../validation/public.validation'
+
+interface CustomerCoordinates {
+  latitude: number
+  longitude: number
+}
 
 const PUBLIC_SHOP_WHERE = {
   approvalStatus: 'APPROVED' as const,
@@ -133,6 +139,46 @@ function mapPublicShopDetail(shop: Shop) {
     openingTime: shop.openingTime,
     closingTime: shop.closingTime,
     serviceRadiusKm: shop.serviceRadiusKm,
+  }
+}
+
+/**
+ * Attaches the live, computed `liveEstimatedDeliveryMinutes` field to a
+ * mapped public shop summary/detail object.
+ *
+ * `latitude`/`longitude` deliberately stay stripped from the public
+ * response (see `mapPublicShopSummary`/`mapPublicShopDetail` above) — the
+ * distance math happens here, server-side, against the shop's real
+ * `Shop.latitude/longitude` columns before they're discarded.
+ *
+ * Tradeoff (list vs. detail granularity): a shop-list render can be many
+ * shops at once, and both the live weather lookup and the live
+ * active-order-count bridge call are one external HTTP request *per shop*.
+ * Paying that cost per shop on every list render doesn't scale and isn't
+ * worth the precision gain for a scannable list, so `listPublicShops` uses
+ * `mode: 'fast'` (distance still computed live if customer coordinates are
+ * known; weather/queue fall back to defaults, no external calls). A single
+ * shop's detail view (`getPublicShop`, plus the catalog/product detail
+ * views which also render shop info) always uses `mode: 'full'` and pays
+ * for the live weather + live queue figures, since there's only one shop
+ * involved.
+ */
+async function attachLiveEta<T extends Record<string, unknown>>(
+  shop: Shop,
+  mapped: T,
+  customerCoordinates: CustomerCoordinates | null | undefined,
+  mode: 'fast' | 'full',
+): Promise<T & { liveEstimatedDeliveryMinutes: number }> {
+  const eta = await getDeliveryEtaMinutes({
+    shop,
+    customerLatitude: customerCoordinates?.latitude ?? null,
+    customerLongitude: customerCoordinates?.longitude ?? null,
+    mode,
+  })
+
+  return {
+    ...mapped,
+    liveEstimatedDeliveryMinutes: eta.etaMinutes,
   }
 }
 
@@ -302,7 +348,7 @@ async function buildValidatedCartSnapshot(
   }
 }
 
-async function listPublicShops() {
+async function listPublicShops(customerCoordinates?: CustomerCoordinates | null) {
   const shops = await prisma.shop.findMany({
     where: {
       ...PUBLIC_SHOP_WHERE,
@@ -316,25 +362,39 @@ async function listPublicShops() {
     orderBy: [{ createdAt: 'desc' }, { name: 'asc' }],
   })
 
+  const items = await Promise.all(
+    shops.map((shop) =>
+      attachLiveEta(shop, mapPublicShopSummary(shop), customerCoordinates, 'fast'),
+    ),
+  )
+
   return {
-    items: shops.map(mapPublicShopSummary),
+    items,
     meta: {
       total: shops.length,
     },
   }
 }
 
-async function getPublicShop(shopIdOrSlug: string) {
+async function getPublicShop(
+  shopIdOrSlug: string,
+  customerCoordinates?: CustomerCoordinates | null,
+) {
   const shop = await getMappedPublicShop(shopIdOrSlug)
+  const item = await attachLiveEta(
+    shop,
+    mapPublicShopDetail(shop),
+    customerCoordinates,
+    'full',
+  )
 
-  return {
-    item: mapPublicShopDetail(shop),
-  }
+  return { item }
 }
 
 async function listPublicShopCatalog(
   shopIdOrSlug: string,
   query: ShopCatalogQueryInput,
+  customerCoordinates?: CustomerCoordinates | null,
 ) {
   const shop = await getMappedPublicShop(shopIdOrSlug)
   const catalog = await listInventoryCatalog({
@@ -349,9 +409,15 @@ async function listPublicShopCatalog(
     sort: query.sort,
     language: query.lang,
   })
+  const item = await attachLiveEta(
+    shop,
+    mapPublicShopDetail(shop),
+    customerCoordinates,
+    'full',
+  )
 
   return {
-    item: mapPublicShopDetail(shop),
+    item,
     items: catalog.items.map(mapCatalogItemForPublicApi),
     filters: catalog.filters,
     pagination: catalog.pagination,
@@ -363,6 +429,7 @@ async function getPublicCatalogProduct(
   shopIdOrSlug: string,
   productId: string,
   language?: string | null,
+  customerCoordinates?: CustomerCoordinates | null,
 ) {
   const shop = await getMappedPublicShop(shopIdOrSlug)
   const product = await getInventoryCatalogProduct({
@@ -371,9 +438,15 @@ async function getPublicCatalogProduct(
     productId,
     language,
   })
+  const shopDetail = await attachLiveEta(
+    shop,
+    mapPublicShopDetail(shop),
+    customerCoordinates,
+    'full',
+  )
 
   return {
-    shop: mapPublicShopDetail(shop),
+    shop: shopDetail,
     item: mapCatalogItemForPublicApi(product.item),
     inventory: product.shopInventory,
   }

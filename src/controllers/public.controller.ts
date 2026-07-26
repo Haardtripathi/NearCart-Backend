@@ -10,16 +10,22 @@ import {
 import {
   publicCartValidationSchema,
   shopCatalogQuerySchema,
+  shopGeoQuerySchema,
 } from '../validation/public.validation'
 import { getTimestamp } from '../utils/time'
 
 async function listPublicShopsHandler(
-  _request: Request,
+  request: Request,
   response: Response,
   next: NextFunction,
 ): Promise<void> {
   try {
-    const result = await listPublicShops()
+    const geo = shopGeoQuerySchema.parse(request.query)
+    const result = await listPublicShops(
+      geo.lat != null && geo.lng != null
+        ? { latitude: geo.lat, longitude: geo.lng }
+        : null,
+    )
 
     response.status(200).json({
       ...result,
@@ -40,7 +46,13 @@ async function getPublicShopHandler(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const result = await getPublicShop(request.params.shopIdOrSlug as string)
+    const geo = shopGeoQuerySchema.parse(request.query)
+    const result = await getPublicShop(
+      request.params.shopIdOrSlug as string,
+      geo.lat != null && geo.lng != null
+        ? { latitude: geo.lat, longitude: geo.lng }
+        : null,
+    )
 
     response.status(200).json({
       ...result,
@@ -64,6 +76,9 @@ async function listPublicShopCatalogHandler(
     const result = await listPublicShopCatalog(
       request.params.shopIdOrSlug as string,
       query,
+      query.lat != null && query.lng != null
+        ? { latitude: query.lat, longitude: query.lng }
+        : null,
     )
 
     response.status(200).json({
@@ -84,10 +99,14 @@ async function getPublicCatalogProductHandler(
   next: NextFunction,
 ): Promise<void> {
   try {
+    const geo = shopGeoQuerySchema.parse(request.query)
     const result = await getPublicCatalogProduct(
       request.params.shopIdOrSlug as string,
       request.params.productId as string,
       typeof request.query.lang === 'string' ? request.query.lang : null,
+      geo.lat != null && geo.lng != null
+        ? { latitude: geo.lat, longitude: geo.lng }
+        : null,
     )
 
     response.status(200).json({

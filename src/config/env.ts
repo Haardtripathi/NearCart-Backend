@@ -95,6 +95,7 @@ const env = {
   smtpFrom: process.env.SMTP_FROM || 'NearKart <no-reply@nearkart.local>',
   smtpSecure: process.env.SMTP_SECURE === 'true',
   googleMapsApiKey: process.env.GOOGLE_MAPS_API_KEY || '',
+  weatherApiKey: process.env.WEATHER_API_KEY || '',
   defaultServiceRadiusKm:
     Number.parseFloat(process.env.DEFAULT_SERVICE_RADIUS_KM || '') || 10,
   // Number of reverse-proxy hops Express should trust when deriving the

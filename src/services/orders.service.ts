@@ -2,8 +2,10 @@ import type { OrderStatus, Prisma, Shop, UserRole } from '@prisma/client'
 
 import env from '../config/env'
 import prisma from '../lib/prisma'
+import { writeAuditLog } from './audit.service'
 import { getAuthoritativeCheckoutSnapshot } from './public-storefront.service'
 import {
+  cancelSalesOrderInInventory,
   getInventorySalesOrderStatus,
   pushSalesOrderToInventory,
 } from './inventory-client.service'
@@ -259,6 +261,21 @@ async function createOrder(
     })
   })
 
+  await writeAuditLog({
+    actorId: options.customerUserId,
+    actorType: 'CUSTOMER',
+    action: 'ORDER_CREATE',
+    entityType: 'Order',
+    entityId: createdOrder.id,
+    before: null,
+    after: {
+      status: createdOrder.status,
+      orderNumber: createdOrder.orderNumber,
+      shopId: createdOrder.shopId,
+      totalAmount: createdOrder.totalAmount,
+    },
+  })
+
   const orderWithSyncState = await syncOrderToInventoryBridge(
     createdOrder,
     shop,
@@ -406,6 +423,30 @@ async function refreshOrderStatusFromInventory(
   }
 }
 
+/**
+ * Shared ownership check for both `getOrderById` and `cancelOrder` — an
+ * ADMIN can access any order, a CUSTOMER only their own, a SHOP_OWNER only
+ * orders placed at a shop they own. Returns 404 (not 403) on a denied
+ * access the same way the original `getOrderById` did, so this never
+ * reveals that an order id exists to someone who shouldn't see it.
+ */
+function assertOrderAccessible(
+  order: OrderWithRelations,
+  accessContext: OrderAccessContext,
+): void {
+  const canAccessOrder =
+    accessContext.role === 'ADMIN' ||
+    (accessContext.role === 'CUSTOMER' &&
+      order.customerUserId === accessContext.userId) ||
+    (accessContext.role === 'SHOP_OWNER' &&
+      Boolean(accessContext.shopOwnerProfileId) &&
+      order.shop?.ownerProfileId === accessContext.shopOwnerProfileId)
+
+  if (!canAccessOrder) {
+    throw createHttpError(404, 'Order not found')
+  }
+}
+
 async function getOrderById(orderId: string, accessContext: OrderAccessContext) {
   const order = await prisma.order.findUnique({
     where: { id: orderId },
@@ -419,21 +460,113 @@ async function getOrderById(orderId: string, accessContext: OrderAccessContext) 
     throw createHttpError(404, 'Order not found')
   }
 
-  const canViewOrder =
-    accessContext.role === 'ADMIN' ||
-    (accessContext.role === 'CUSTOMER' &&
-      order.customerUserId === accessContext.userId) ||
-    (accessContext.role === 'SHOP_OWNER' &&
-      Boolean(accessContext.shopOwnerProfileId) &&
-      order.shop?.ownerProfileId === accessContext.shopOwnerProfileId)
-
-  if (!canViewOrder) {
-    throw createHttpError(404, 'Order not found')
-  }
+  assertOrderAccessible(order, accessContext)
 
   const refreshedOrder = await refreshOrderStatusFromInventory(order)
 
   return mapOrder(refreshedOrder)
 }
 
-export { createOrder, getOrderById }
+/**
+ * Customer-initiated order cancellation. Locked business rule: only
+ * allowed while `status === 'PENDING_CONFIRMATION'` — once a shop has
+ * acted on an order (accepted/rejected/etc.) it's too late to cancel
+ * through this endpoint, and any other status (including an
+ * already-terminal one) is a 409.
+ *
+ * On success: flips the local status to `CANCELLED`, then — only if the
+ * order was actually bridged into Inventory (`inventorySyncStatus ===
+ * 'SYNCED'` and it has an `inventorySalesOrderId`; a `FAILED`/
+ * `NOT_APPLICABLE` sync means there's nothing to cancel on that side) —
+ * calls `cancelSalesOrderInInventory`. That bridge call's failure is
+ * logged and reflected back onto `inventorySyncStatus`/`inventorySyncError`
+ * (mirroring `syncOrderToInventoryBridge`'s convention) so the desync is
+ * visible in the order-detail response and in logs, but it never blocks
+ * the local cancel from succeeding — a customer cancelling their own order
+ * must not be held hostage by a flaky bridge call.
+ */
+async function cancelOrder(orderId: string, accessContext: OrderAccessContext) {
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    include: {
+      items: true,
+      shop: true,
+    },
+  })
+
+  if (!order) {
+    throw createHttpError(404, 'Order not found')
+  }
+
+  assertOrderAccessible(order, accessContext)
+
+  if (order.status !== 'PENDING_CONFIRMATION') {
+    throw createHttpError(
+      409,
+      'Order can no longer be cancelled — it has already been accepted by the shop.',
+    )
+  }
+
+  const beforeSnapshot = { status: order.status }
+
+  let finalOrder = await prisma.order.update({
+    where: { id: order.id },
+    data: { status: 'CANCELLED' },
+    include: { items: true, shop: true },
+  })
+
+  const shouldCancelInInventory =
+    order.inventorySyncStatus === 'SYNCED' &&
+    Boolean(order.inventorySalesOrderId) &&
+    Boolean(order.shop?.inventoryOrganizationId)
+
+  if (shouldCancelInInventory) {
+    try {
+      await cancelSalesOrderInInventory({
+        organizationId: order.shop!.inventoryOrganizationId!,
+        externalOrderId: order.id,
+      })
+
+      finalOrder = await prisma.order.update({
+        where: { id: order.id },
+        data: {
+          inventorySyncStatus: 'SYNCED',
+          inventorySyncError: null,
+          inventoryLastSyncedAt: new Date(),
+        },
+        include: { items: true, shop: true },
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error'
+
+      console.error(
+        `[NearKart] Order ${order.orderNumber} was cancelled locally, but cancelling the linked SalesOrder in the inventory bridge failed (now desynced — the shop's Inventory dashboard will not reflect this cancellation until reconciled):`,
+        message,
+      )
+
+      finalOrder = await prisma.order.update({
+        where: { id: order.id },
+        data: {
+          inventorySyncStatus: 'FAILED',
+          inventorySyncError: `Cancel was not reflected in inventory: ${message}`.slice(0, 500),
+          inventoryLastSyncedAt: new Date(),
+        },
+        include: { items: true, shop: true },
+      })
+    }
+  }
+
+  await writeAuditLog({
+    actorId: accessContext.userId,
+    actorType: accessContext.role,
+    action: 'ORDER_CANCEL',
+    entityType: 'Order',
+    entityId: order.id,
+    before: beforeSnapshot,
+    after: { status: finalOrder.status },
+  })
+
+  return mapOrder(finalOrder)
+}
+
+export { cancelOrder, createOrder, getOrderById }

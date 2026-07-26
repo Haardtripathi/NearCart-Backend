@@ -143,7 +143,7 @@ interface InventoryAvailabilityResponse {
 }
 
 interface InventoryRequestOptions {
-  method?: 'GET' | 'POST'
+  method?: 'GET' | 'POST' | 'PATCH'
   query?: Record<string, string | number | boolean | null | undefined>
   body?: unknown
   headers?: Record<string, string>
@@ -441,8 +441,66 @@ async function getInventorySalesOrderStatus(
   )
 }
 
+interface CancelSalesOrderResponse {
+  salesOrderId: string
+  orderNumber: string
+  status: string
+  cancelledAt: string
+}
+
+/**
+ * Cancels a previously-pushed SalesOrder on the Inventory side, keyed by
+ * this app's own Order id (the same `externalOrderId` used when pushing).
+ * Contract (locked against Track B, see NearCart CLAUDE.md /
+ * PHASE1_REQUIREMENTS.md for the two-track precedent this mirrors):
+ *
+ *   PATCH /api/internal/marketplace/organizations/:organizationId/
+ *     sales-orders/by-external/:externalOrderId/cancel
+ *   200 -> { salesOrderId, orderNumber, status: "CANCELLED", cancelledAt }
+ *   404 if externalOrderId not found; 409 if it can't be cancelled
+ *   (already terminal on the Inventory side).
+ *
+ * Like `pushSalesOrderToInventory`, this intentionally does not throw on
+ * the caller's behalf in a way that should abort the local cancel — see
+ * `orders.service.ts`'s `cancelOrder`, which catches failures here and
+ * still finalizes the local `CANCELLED` status, just flags the desync.
+ */
+async function cancelSalesOrderInInventory(input: {
+  organizationId: string
+  externalOrderId: string
+}): Promise<CancelSalesOrderResponse> {
+  return inventoryRequest<CancelSalesOrderResponse>(
+    `${MARKETPLACE_BRIDGE_PREFIX}/organizations/${input.organizationId}/sales-orders/by-external/${input.externalOrderId}/cancel`,
+    { method: 'PATCH' },
+  )
+}
+
+interface ActiveOrderCountResponse {
+  activeOrderCount: number
+}
+
+/**
+ * Reads how many currently-active SalesOrders a branch has, used by
+ * `delivery-eta.service.ts` as the "how busy is this shop right now" queue
+ * signal. Contract (locked against Track B):
+ *
+ *   GET /api/internal/marketplace/organizations/:organizationId/
+ *     branches/:branchId/active-order-count
+ *   200 -> { activeOrderCount: number }
+ */
+async function getInventoryActiveOrderCount(input: {
+  organizationId: string
+  branchId: string
+}): Promise<ActiveOrderCountResponse> {
+  return inventoryRequest<ActiveOrderCountResponse>(
+    `${MARKETPLACE_BRIDGE_PREFIX}/organizations/${input.organizationId}/branches/${input.branchId}/active-order-count`,
+  )
+}
+
 export {
+  cancelSalesOrderInInventory,
   checkInventoryAvailability,
+  getInventoryActiveOrderCount,
   getInventoryBridgeMeta,
   getInventoryCatalogProduct,
   getInventorySalesOrderStatus,
@@ -452,6 +510,8 @@ export {
 }
 
 export type {
+  ActiveOrderCountResponse,
+  CancelSalesOrderResponse,
   InventoryAvailabilityResponse,
   InventoryCatalogFilters,
   InventoryCatalogItem,

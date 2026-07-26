@@ -5,14 +5,20 @@ import {
   getPublicShop,
   listPublicShops,
 } from '../services/public-storefront.service'
+import { shopGeoQuerySchema } from '../validation/public.validation'
 
 async function listShops(
-  _request: Request,
+  request: Request,
   response: Response,
   next: NextFunction,
 ): Promise<void> {
   try {
-    const result = await listPublicShops()
+    const geo = shopGeoQuerySchema.parse(request.query)
+    const result = await listPublicShops(
+      geo.lat != null && geo.lng != null
+        ? { latitude: geo.lat, longitude: geo.lng }
+        : null,
+    )
 
     response.status(200).json({
       ...result,
@@ -33,7 +39,13 @@ async function getShopDetails(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const result = await getPublicShop(request.params.shopId as string)
+    const geo = shopGeoQuerySchema.parse(request.query)
+    const result = await getPublicShop(
+      request.params.shopId as string,
+      geo.lat != null && geo.lng != null
+        ? { latitude: geo.lat, longitude: geo.lng }
+        : null,
+    )
 
     response.status(200).json({
       ...result,

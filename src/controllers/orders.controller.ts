@@ -2,6 +2,7 @@ import type { NextFunction, Request, Response } from 'express'
 
 import { getTimestamp } from '../utils/time'
 import {
+  cancelOrder,
   createOrder,
   getOrderById,
 } from '../services/orders.service'
@@ -54,4 +55,28 @@ async function getOrderByIdHandler(
   }
 }
 
-export { createOrderHandler, getOrderByIdHandler }
+async function cancelOrderHandler(
+  request: Request,
+  response: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const order = await cancelOrder(request.params.orderId as string, {
+      userId: request.auth!.userId,
+      role: request.auth!.role,
+      shopOwnerProfileId: request.auth!.user.shopOwnerProfile?.id ?? null,
+    })
+
+    response.status(200).json({
+      item: order,
+      meta: {
+        source: 'database',
+        timestamp: getTimestamp(),
+      },
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+export { cancelOrderHandler, createOrderHandler, getOrderByIdHandler }

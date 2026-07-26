@@ -250,6 +250,22 @@ model OrderItem {
   @@index([orderId])
 }
 
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?
+  actorType  String
+  action     String
+  entityType String
+  entityId   String
+  beforeJson String?
+  afterJson  String?
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([action])
+  @@index([createdAt])
+}
+
 model ShopMembership {
   id             String             @id @default(cuid())
   shopId          String

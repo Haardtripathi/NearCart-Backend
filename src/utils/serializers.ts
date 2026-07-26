@@ -199,6 +199,11 @@ function mapOrder(order: OrderSource) {
     placedAt: order.placedAt,
     acceptedAt: order.acceptedAt,
     deliveredAt: order.deliveredAt,
+    // Mirrors the locked business rule in `orders.service.ts`'s
+    // `cancelOrder` — a customer can only cancel while the shop hasn't
+    // acted on the order yet. Computed here (not stored) so it's always
+    // derived from the current status rather than risking drift.
+    isCancellable: order.status === 'PENDING_CONFIRMATION',
     inventorySalesOrderId: order.inventorySalesOrderId ?? null,
     inventorySalesOrderNumber: order.inventorySalesOrderNumber ?? null,
     inventorySyncStatus: order.inventorySyncStatus ?? null,
