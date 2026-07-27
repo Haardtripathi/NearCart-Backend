@@ -31,7 +31,11 @@ async function listPublicShopsHandler(
       query.lat != null && query.lng != null
         ? { latitude: query.lat, longitude: query.lng }
         : null,
-      { search: query.search || undefined, category: query.category || undefined },
+      {
+        search: query.search || undefined,
+        category: query.category || undefined,
+        city: query.city || undefined,
+      },
     )
 
     response.status(200).json({
@@ -76,6 +80,7 @@ async function searchPublicCatalogHandler(
     const query = publicSearchQuerySchema.parse(request.query)
     const result = await searchPublicCatalog(query.q, {
       category: query.category || undefined,
+      city: query.city || undefined,
       limit: query.limit,
       language: query.lang || undefined,
     })
@@ -102,6 +107,7 @@ async function listTrendingProductsHandler(
     const query = publicTrendingQuerySchema.parse(request.query)
     const result = await listTrendingProducts({
       category: query.category || undefined,
+      city: query.city || undefined,
       limit: query.limit,
       language: query.lang || undefined,
     })

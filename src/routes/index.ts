@@ -4,6 +4,7 @@ import adminRoutes from './admin.routes'
 import authRoutes from './auth.routes'
 import customerRoutes from './customer.routes'
 import healthRoutes from './health.routes'
+import internalRoutes from './internal.routes'
 import locationRoutes from './location.routes'
 import ordersRoutes from './orders.routes'
 import publicRoutes from './public.routes'
@@ -21,5 +22,6 @@ router.use(publicRoutes)
 router.use(shopsRoutes)
 router.use(ordersRoutes)
 router.use(locationRoutes)
+router.use(internalRoutes)
 
 export default router

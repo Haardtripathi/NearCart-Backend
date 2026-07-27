@@ -12,6 +12,7 @@ import { createHttpError } from '../utils/httpError'
 import { normalizeOptionalString } from '../utils/user'
 import type {
   CreateAddressInput,
+  RegisterDeviceTokenInput,
   UpdateAddressInput,
   UpdateCustomerProfileInput,
 } from '../validation/customer.validation'
@@ -366,12 +367,49 @@ async function listCustomerOrders(userId: string) {
   }
 }
 
+async function registerCustomerDeviceToken(
+  userId: string,
+  payload: RegisterDeviceTokenInput,
+) {
+  await getCustomerUser(userId)
+
+  const deviceToken = await prisma.deviceToken.upsert({
+    where: {
+      ownerId_expoPushToken: {
+        ownerId: userId,
+        expoPushToken: payload.expoPushToken,
+      },
+    },
+    update: {
+      platform: normalizeOptionalString(payload.platform),
+      ownerType: 'CUSTOMER',
+    },
+    create: {
+      ownerId: userId,
+      ownerType: 'CUSTOMER',
+      expoPushToken: payload.expoPushToken,
+      platform: normalizeOptionalString(payload.platform),
+    },
+  })
+
+  return {
+    item: {
+      id: deviceToken.id,
+      platform: deviceToken.platform,
+      createdAt: deviceToken.createdAt,
+      updatedAt: deviceToken.updatedAt,
+    },
+    meta: buildMeta(),
+  }
+}
+
 export {
   createCustomerAddress,
   deleteCustomerAddress,
   getCustomerProfile,
   listCustomerAddresses,
   listCustomerOrders,
+  registerCustomerDeviceToken,
   updateCustomerAddress,
   updateCustomerProfile,
 }

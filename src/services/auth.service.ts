@@ -33,8 +33,23 @@ function buildRefreshCookieOptions(): CookieOptions {
 
 function getRefreshTokenFromRequest(request: Request): string | null {
   const cookies = parseCookies(request.headers.cookie)
+  const cookieToken = cookies[env.authRefreshCookieName]
 
-  return cookies[env.authRefreshCookieName] || null
+  if (cookieToken) {
+    return cookieToken
+  }
+
+  // Native clients (React Native) have no cookie jar, so the rotating
+  // refresh cookie system is unreachable for them unless we also accept the
+  // token from the request body. Cookie is checked first so nothing changes
+  // for the existing web flow; this is purely a fallback for native.
+  const bodyToken = (request.body as Record<string, unknown> | undefined)?.[
+    'refreshToken'
+  ]
+
+  return typeof bodyToken === 'string' && bodyToken.trim().length > 0
+    ? bodyToken
+    : null
 }
 
 async function getUserForAuth(userId: string): Promise<AuthUser | null> {
@@ -283,7 +298,23 @@ async function refreshSession(refreshTokenValue: string | null) {
     },
   })
 
-  if (!refreshTokenRecord || refreshTokenRecord.revokedAt) {
+  if (!refreshTokenRecord) {
+    throw createHttpError(401, 'Refresh session is invalid')
+  }
+
+  if (refreshTokenRecord.revokedAt) {
+    // Reuse of a refresh token that was already rotated away is the standard signal of token
+    // theft under rotation: the legitimate client already exchanged this exact token for a
+    // newer one, so whoever just presented it again is not that client (stolen cookie/body
+    // token, replayed request, etc). Rather than just rejecting this one call, revoke every
+    // other still-active session for the user too — otherwise an attacker holding a stolen
+    // (but not-yet-rotated-by-them) token could keep the legitimate session's sibling tokens
+    // alive indefinitely while this branch quietly no-ops.
+    await prisma.refreshToken.updateMany({
+      where: { userId: refreshTokenRecord.userId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    })
+
     throw createHttpError(401, 'Refresh session is invalid')
   }
 

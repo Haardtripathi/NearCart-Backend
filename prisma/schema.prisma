@@ -71,6 +71,7 @@ model User {
   customerOrders   Order[]           @relation("CustomerOrders")
   customerProfile  CustomerProfile?
   refreshTokens    RefreshToken[]
+  deviceTokens     DeviceToken[]
   shopOwnerProfile ShopOwnerProfile?
 }
 
@@ -177,6 +178,25 @@ model RefreshToken {
 
   @@index([userId])
   @@index([expiresAt])
+}
+
+// Registered by the customer app on login for push notifications (order confirmed/rejected,
+// driver assigned, out for delivery, delivered, auto-cancelled). ownerType is fixed to
+// 'CUSTOMER' here — this backend only ever notifies customers, mirroring the shape of
+// NearCart-Inventory's own DeviceToken table (which also covers shop staff + drivers) so the
+// push-notification service code looks the same on both sides.
+model DeviceToken {
+  id            String   @id @default(cuid())
+  ownerType     String   @default("CUSTOMER")
+  ownerId       String
+  expoPushToken String
+  platform      String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  user          User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@unique([ownerId, expoPushToken])
+  @@index([ownerId])
 }
 
 model Order {

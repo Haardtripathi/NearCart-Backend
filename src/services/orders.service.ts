@@ -4,6 +4,7 @@ import env from '../config/env'
 import prisma from '../lib/prisma'
 import { writeAuditLog } from './audit.service'
 import { getAuthoritativeCheckoutSnapshot } from './public-storefront.service'
+import { sendPushToCustomer } from './push-notification.service'
 import {
   cancelSalesOrderInInventory,
   getInventorySalesOrderStatus,
@@ -166,10 +167,34 @@ async function resolveCustomerAddress(
   return address
 }
 
+/**
+ * Bug found via live end-to-end testing 2026-07-27: `CheckoutPage.tsx`'s "verify your email
+ * before ordering" gate is UI-only — a curl'd `POST /orders` with a valid access token from an
+ * unverified account went through to a real, inventory-synced order, 201 Created, no server-side
+ * check anywhere in this function. Client-side gates are a UX nicety, never the actual
+ * enforcement boundary; this closes that gap at the one place that actually matters.
+ */
+async function assertCustomerIsVerified(customerUserId: string): Promise<void> {
+  const user = await prisma.user.findUnique({
+    where: { id: customerUserId },
+    select: { isVerified: true },
+  })
+
+  if (!user?.isVerified) {
+    throw createHttpError(
+      403,
+      'Please verify your email before placing an order.',
+      { code: 'EMAIL_NOT_VERIFIED' },
+    )
+  }
+}
+
 async function createOrder(
   payload: CheckoutPayloadInput,
   options: CreateOrderOptions,
 ) {
+  await assertCustomerIsVerified(options.customerUserId)
+
   const placedAt = new Date()
   const customerAddress = await resolveCustomerAddress(
     options.customerUserId,
@@ -569,4 +594,106 @@ async function cancelOrder(orderId: string, accessContext: OrderAccessContext) {
   return mapOrder(finalOrder)
 }
 
-export { cancelOrder, createOrder, getOrderById }
+interface InventoryOrderEventInput {
+  externalOrderId: string
+  status: string
+  eventType:
+    | 'CONFIRMED'
+    | 'REJECTED'
+    | 'READY'
+    | 'DRIVER_ASSIGNED'
+    | 'OUT_FOR_DELIVERY'
+    | 'DELIVERED'
+    | 'AUTO_CANCELLED'
+  assignedDriver?: { fullName: string; phone: string; vehicleType: string } | null
+}
+
+const ORDER_EVENT_NOTIFICATION_COPY: Record<
+  InventoryOrderEventInput['eventType'],
+  { title: string; body: string }
+> = {
+  CONFIRMED: { title: 'Order confirmed', body: 'Your order has been confirmed by the shop.' },
+  REJECTED: { title: 'Order declined', body: 'The shop was unable to accept your order.' },
+  READY: { title: 'Order ready', body: 'Your order is ready and awaiting a delivery partner.' },
+  DRIVER_ASSIGNED: {
+    title: 'Delivery partner assigned',
+    body: 'A delivery partner has been assigned to your order.',
+  },
+  OUT_FOR_DELIVERY: {
+    title: 'Out for delivery',
+    body: 'Your order is on its way!',
+  },
+  DELIVERED: { title: 'Order delivered', body: 'Your order has been delivered. Enjoy!' },
+  AUTO_CANCELLED: {
+    title: 'Order cancelled',
+    body: 'The shop did not confirm your order in time, so it was automatically cancelled.',
+  },
+}
+
+/**
+ * Receiver side of the reverse notification webhook (see middleware/internalService.ts +
+ * routes/internal.routes.ts) — NearCart-Inventory calls this whenever a bridged SalesOrder
+ * (source: APP) changes status, since the customer/device-token relationship lives here, not
+ * there. Replaces the old poll-only refreshOrderStatusFromInventory as the primary way
+ * Order.status advances for bridged orders; that function stays in place as a fallback for
+ * orders whose webhook call was missed (network blip, etc).
+ */
+async function applyInventoryOrderEvent(input: InventoryOrderEventInput): Promise<void> {
+  const order = await prisma.order.findUnique({ where: { id: input.externalOrderId } })
+
+  if (!order) {
+    return
+  }
+
+  // Guard against a duplicate/out-of-order webhook call regressing an order that has already
+  // reached a terminal state — e.g. a delayed CONFIRMED event arriving after a faster
+  // AUTO_CANCELLED/DELIVERED call already landed. Once terminal, nothing coming through this
+  // webhook should move the order (or notify the customer about it) again.
+  if (TERMINAL_ORDER_STATUSES.has(order.status)) {
+    return
+  }
+
+  const mappedStatus = mapInventorySalesOrderStatus(input.status)
+
+  if (mappedStatus && mappedStatus !== order.status) {
+    const updateData: Prisma.OrderUpdateInput = {
+      status: mappedStatus,
+      inventorySyncStatus: 'SYNCED',
+      inventorySyncError: null,
+      inventoryLastSyncedAt: new Date(),
+    }
+
+    if (mappedStatus === 'ACCEPTED' && !order.acceptedAt) {
+      updateData.acceptedAt = new Date()
+    }
+
+    if (mappedStatus === 'DELIVERED' && !order.deliveredAt) {
+      updateData.deliveredAt = new Date()
+    }
+
+    await prisma.order.update({ where: { id: order.id }, data: updateData })
+  }
+
+  // `customerUserId` is nullable (SetNull if the owning User is ever deleted) — there's no
+  // device to notify in that case, but the status update above must still happen regardless.
+  // Previously this whole function bailed out before the status update whenever
+  // `customerUserId` was null, silently dropping the order out of sync with Inventory forever.
+  if (!order.customerUserId) {
+    return
+  }
+
+  const copy = ORDER_EVENT_NOTIFICATION_COPY[input.eventType]
+  const body =
+    input.eventType === 'DRIVER_ASSIGNED' && input.assignedDriver
+      ? `${input.assignedDriver.fullName} (${input.assignedDriver.vehicleType}) has been assigned to your order.`
+      : copy.body
+
+  await sendPushToCustomer(order.customerUserId, {
+    title: copy.title,
+    body,
+    data: { orderId: order.id, eventType: input.eventType },
+    channelId: 'order_alert',
+  })
+}
+
+export { applyInventoryOrderEvent, cancelOrder, createOrder, getOrderById }

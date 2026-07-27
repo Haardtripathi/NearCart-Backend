@@ -7,11 +7,13 @@ import {
   getCustomerProfile,
   listCustomerAddresses,
   listCustomerOrders,
+  registerCustomerDeviceToken,
   updateCustomerAddress,
   updateCustomerProfile,
 } from '../services/customer.service'
 import {
   createAddressSchema,
+  registerDeviceTokenSchema,
   updateAddressSchema,
   updateCustomerProfileSchema,
 } from '../validation/customer.validation'
@@ -124,12 +126,28 @@ async function listCustomerOrdersHandler(
   }
 }
 
+async function registerCustomerDeviceTokenHandler(
+  request: Request,
+  response: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const payload = registerDeviceTokenSchema.parse(request.body)
+    const result = await registerCustomerDeviceToken(request.auth!.userId, payload)
+
+    response.status(200).json(result)
+  } catch (error) {
+    next(error)
+  }
+}
+
 export {
   createCustomerAddressHandler,
   deleteCustomerAddressHandler,
   getCustomerProfileHandler,
   listCustomerAddressesHandler,
   listCustomerOrdersHandler,
+  registerCustomerDeviceTokenHandler,
   updateCustomerAddressHandler,
   updateCustomerProfileHandler,
 }

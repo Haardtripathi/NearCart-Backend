@@ -356,7 +356,27 @@ async function updateShop(
   }
 }
 
+// Ownership check shared by anything mutating a specific shop outside `updateShop` itself — the
+// new logo-upload route (uploads.controller.ts) needs the same 404-if-not-owned guard without
+// duplicating the `getShopOwnerUser` + `prisma.shop.findFirst` pair inline.
+async function assertShopOwnership(userId: string, shopId: string): Promise<void> {
+  const user = await getShopOwnerUser(userId)
+
+  const shop = await prisma.shop.findFirst({
+    where: {
+      id: shopId,
+      ownerProfileId: user.shopOwnerProfile.id,
+    },
+    select: { id: true },
+  })
+
+  if (!shop) {
+    throw createHttpError(404, 'Shop not found')
+  }
+}
+
 export {
+  assertShopOwnership,
   createShop,
   getShopOwnerProfile,
   getShopOwnerShop,

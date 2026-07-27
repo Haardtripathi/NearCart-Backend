@@ -370,7 +370,7 @@ async function buildValidatedCartSnapshot(
 
 async function listPublicShops(
   customerCoordinates?: CustomerCoordinates | null,
-  filters?: { search?: string | null; category?: string | null },
+  filters?: { search?: string | null; category?: string | null; city?: string | null },
 ) {
   const shops = await prisma.shop.findMany({
     where: {
@@ -381,6 +381,12 @@ async function listPublicShops(
       // covers the realistic case of English shop names without it.
       ...(filters?.search ? { name: { contains: filters.search } } : {}),
       ...(filters?.category ? { category: filters.category } : {}),
+      // `contains`, not exact equality — `Shop.city` is free text (see public.validation.ts's
+      // `city` param docs), and SQLite's LIKE (which `contains` compiles to) is ASCII
+      // case-insensitive, same reasoning as the `name`/search filter above. Exact equality here
+      // previously meant a customer typing "mumbai" against a DB value of "Mumbai" silently got
+      // zero shops back instead of a case-normalized match.
+      ...(filters?.city ? { city: { contains: filters.city } } : {}),
     },
     orderBy: [{ createdAt: 'desc' }, { name: 'asc' }],
   })
@@ -420,13 +426,16 @@ async function listPublicShopCategories() {
 }
 
 async function fetchCandidateShops(
-  filters: { category?: string | null } | undefined,
+  filters: { category?: string | null; city?: string | null } | undefined,
   take: number,
 ): Promise<Shop[]> {
   return prisma.shop.findMany({
     where: {
       ...PUBLIC_MAPPED_SHOP_WHERE,
       ...(filters?.category ? { category: filters.category } : {}),
+      // See listPublicShops above — `contains` for the same case-insensitivity reason, so
+      // search/trending fan-out don't silently return zero candidate shops on a casing mismatch.
+      ...(filters?.city ? { city: { contains: filters.city } } : {}),
     },
     orderBy: [{ createdAt: 'desc' }, { name: 'asc' }],
     take,
@@ -511,11 +520,16 @@ function mapCatalogItemForSearchResult(shop: Shop, item: InventoryCatalogItem) {
 // Shop.category (shop-type), not product category — easy to misread, so stated explicitly.
 async function searchPublicCatalog(
   query: string,
-  options?: { category?: string | null; limit?: number; language?: string | null },
+  options?: {
+    category?: string | null
+    city?: string | null
+    limit?: number
+    language?: string | null
+  },
 ) {
   const limit = options?.limit ?? 24
   const candidateShops = await fetchCandidateShops(
-    { category: options?.category },
+    { category: options?.category, city: options?.city },
     SEARCH_FANOUT_SHOP_CAP,
   )
   const groups = await fanOutCatalogAcrossShops(candidateShops, (shop) => ({
@@ -547,12 +561,13 @@ async function searchPublicCatalog(
 // ranking. `meta.strategy` says so in the response itself.
 async function listTrendingProducts(options?: {
   category?: string | null
+  city?: string | null
   limit?: number
   language?: string | null
 }) {
   const limit = options?.limit ?? 20
   const candidateShops = await fetchCandidateShops(
-    { category: options?.category },
+    { category: options?.category, city: options?.city },
     TRENDING_FANOUT_SHOP_CAP,
   )
   const groups = await fanOutCatalogAcrossShops(candidateShops, (shop) => ({

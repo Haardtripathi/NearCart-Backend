@@ -44,18 +44,26 @@ const updateAddressSchema = createAddressSchema
     'At least one address field is required',
   )
 
+const registerDeviceTokenSchema = z.object({
+  expoPushToken: z.string().trim().min(1, 'Expo push token is required'),
+  platform: optionalTrimmedString,
+})
+
 type UpdateCustomerProfileInput = z.infer<typeof updateCustomerProfileSchema>
 type CreateAddressInput = z.infer<typeof createAddressSchema>
 type UpdateAddressInput = z.infer<typeof updateAddressSchema>
+type RegisterDeviceTokenInput = z.infer<typeof registerDeviceTokenSchema>
 
 export {
   createAddressSchema,
+  registerDeviceTokenSchema,
   updateAddressSchema,
   updateCustomerProfileSchema,
 }
 
 export type {
   CreateAddressInput,
+  RegisterDeviceTokenInput,
   UpdateAddressInput,
   UpdateCustomerProfileInput,
 }

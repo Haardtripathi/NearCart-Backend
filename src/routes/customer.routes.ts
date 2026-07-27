@@ -6,6 +6,7 @@ import {
   getCustomerProfileHandler,
   listCustomerAddressesHandler,
   listCustomerOrdersHandler,
+  registerCustomerDeviceTokenHandler,
   updateCustomerAddressHandler,
   updateCustomerProfileHandler,
 } from '../controllers/customer.controller'
@@ -22,5 +23,6 @@ router.post('/addresses', createCustomerAddressHandler)
 router.patch('/addresses/:id', updateCustomerAddressHandler)
 router.delete('/addresses/:id', deleteCustomerAddressHandler)
 router.get('/orders', listCustomerOrdersHandler)
+router.post('/device-token', registerCustomerDeviceTokenHandler)
 
 export default router

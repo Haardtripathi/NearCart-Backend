@@ -71,7 +71,10 @@ const env = {
   databaseUrl,
   jwtAccessSecret,
   jwtAccessExpiresIn: process.env.JWT_ACCESS_EXPIRES_IN || '15m',
-  refreshTokenTtlDays: parseInteger(process.env.AUTH_REFRESH_TTL_DAYS, 30),
+  // Bumped from 30 to 90 (a "few months" tenor) — see auth.service.ts's native-client refresh
+  // path, which is what actually makes a long-lived session usable on mobile (web already had a
+  // working rotating-refresh-cookie flow at 30 days; the low number was never the constraint).
+  refreshTokenTtlDays: parseInteger(process.env.AUTH_REFRESH_TTL_DAYS, 90),
   authRefreshCookieName:
     process.env.AUTH_REFRESH_COOKIE_NAME || 'nearkart_refresh',
   adminBootstrapEmail: process.env.ADMIN_BOOTSTRAP_EMAIL || '',
@@ -114,6 +117,22 @@ const env = {
     process.env.TRUST_PROXY_HOPS,
     nodeEnv === 'production' ? 1 : 0,
   ),
+  // Firebase Admin SDK (push notifications) — all optional; push-notification.service.ts no-ops
+  // with a logged warning until these are set, rather than crashing at boot. Populate once a
+  // Firebase project + service account exist.
+  firebaseProjectId: process.env.FIREBASE_PROJECT_ID || '',
+  firebaseClientEmail: process.env.FIREBASE_CLIENT_EMAIL || '',
+  // Service-account private keys are typically stored with literal "\n" sequences in .env files;
+  // real newlines are restored here so admin.credential.cert() gets a valid PEM.
+  firebasePrivateKey: (process.env.FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
+  // Cloudinary (real shop-photo upload) — `cloudinary`/`multer` were already dependencies before
+  // this was wired up. All optional; uploads.service.ts throws a clear 503 until these are set,
+  // rather than crashing at boot, matching the existing lazy-config pattern used for Firebase.
+  cloudinaryCloudName: process.env.CLOUDINARY_CLOUD_NAME || '',
+  cloudinaryApiKey: process.env.CLOUDINARY_API_KEY || '',
+  cloudinaryApiSecret: process.env.CLOUDINARY_API_SECRET || '',
+  cloudinaryUploadFolder: process.env.CLOUDINARY_UPLOAD_FOLDER || 'nearkart',
+  imageUploadMaxBytes: parseInteger(process.env.IMAGE_UPLOAD_MAX_BYTES, 5 * 1024 * 1024),
 }
 
 export default env

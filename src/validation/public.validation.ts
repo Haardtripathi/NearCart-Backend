@@ -19,17 +19,20 @@ const shopGeoQuerySchema = z.object({
 const shopListQuerySchema = shopGeoQuerySchema.extend({
   search: optionalTrimmedString,
   category: optionalTrimmedString,
+  city: optionalTrimmedString,
 })
 
 const publicSearchQuerySchema = z.object({
   q: z.string().trim().min(2, 'Search query must be at least 2 characters'),
   category: optionalTrimmedString,
+  city: optionalTrimmedString,
   limit: z.coerce.number().int().min(1).max(60).default(24),
   lang: optionalTrimmedString,
 })
 
 const publicTrendingQuerySchema = z.object({
   category: optionalTrimmedString,
+  city: optionalTrimmedString,
   limit: z.coerce.number().int().min(1).max(40).default(20),
   lang: optionalTrimmedString,
 })
