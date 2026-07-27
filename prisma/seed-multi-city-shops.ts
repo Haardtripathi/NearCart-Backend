@@ -11,7 +11,13 @@
  * Does NOT touch "Owner Verify Central" or any other pre-existing row.
  *
  * Run with:  node --import tsx prisma/seed-multi-city-shops.ts
+ *
+ * NOTE: unlike src/server.ts, this standalone script doesn't go through the app's normal bootstrap
+ * — it must load dotenv itself (added 2026-07-27) or src/config/env.ts silently falls back to its
+ * local `file:./prisma/nearkart.db` default instead of the real DATABASE_URL/Turso DB, which would
+ * make this script quietly operate on stale local data instead of the live database.
  */
+import "dotenv/config";
 import { readFileSync } from "node:fs";
 
 import prisma from "../src/lib/prisma";

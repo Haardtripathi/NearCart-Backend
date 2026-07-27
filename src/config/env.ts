@@ -69,6 +69,9 @@ const env = {
     8000,
   ),
   databaseUrl,
+  // Only needed for a remote libSQL/Turso database (empty/undefined for a local `file:` URL,
+  // which needs no auth) — passed separately from the URL to PrismaLibSql's Config object.
+  databaseAuthToken: process.env.DATABASE_AUTH_TOKEN || '',
   jwtAccessSecret,
   jwtAccessExpiresIn: process.env.JWT_ACCESS_EXPIRES_IN || '15m',
   // Bumped from 30 to 90 (a "few months" tenor) — see auth.service.ts's native-client refresh

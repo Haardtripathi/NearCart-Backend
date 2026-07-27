@@ -8,7 +8,11 @@ const globalForPrisma = globalThis as typeof globalThis & {
 }
 
 function createPrismaClient(): PrismaClient {
-  const adapter = new PrismaLibSql({ url: env.databaseUrl })
+  const adapter = new PrismaLibSql({
+    url: env.databaseUrl,
+    // Only meaningful for a remote libSQL/Turso URL; harmless/unused for a local `file:` URL.
+    ...(env.databaseAuthToken ? { authToken: env.databaseAuthToken } : {}),
+  })
 
   return new PrismaClient({
     adapter,
