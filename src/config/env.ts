@@ -54,6 +54,11 @@ const jwtAccessSecret =
 assertProductionRequired('DATABASE_URL', process.env.DATABASE_URL || '')
 assertProductionSecret('JWT_ACCESS_SECRET', jwtAccessSecret)
 
+const isRemoteDatabase = databaseUrl.toLowerCase().startsWith('libsql://') || databaseUrl.toLowerCase().startsWith('https://')
+if (isRemoteDatabase) {
+  assertProductionRequired('DATABASE_AUTH_TOKEN', process.env.DATABASE_AUTH_TOKEN || '')
+}
+
 const env = {
   appName: process.env.APP_NAME || 'NearKart Main App',
   nodeEnv,

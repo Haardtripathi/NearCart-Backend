@@ -17,14 +17,22 @@ async function startServer(): Promise<void> {
       console.log(`[NearKart] ${signal} received. Closing HTTP server.`)
 
       server.close((error) => {
-        void prisma.$disconnect().finally(() => {
-          if (error) {
-            console.error('[NearKart] Error while closing HTTP server', error)
-            process.exit(1)
-          }
+        void prisma
+          .$disconnect()
+          .catch((disconnectError) => {
+            console.error(
+              '[NearKart] Error while disconnecting Prisma during shutdown',
+              disconnectError,
+            )
+          })
+          .finally(() => {
+            if (error) {
+              console.error('[NearKart] Error while closing HTTP server', error)
+              process.exit(1)
+            }
 
-          process.exit(0)
-        })
+            process.exit(0)
+          })
       })
     }
 
