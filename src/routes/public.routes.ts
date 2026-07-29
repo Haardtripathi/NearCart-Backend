@@ -6,6 +6,7 @@ import {
   listPublicShopCatalogHandler,
   listPublicShopCategoriesHandler,
   listPublicShopsHandler,
+  listShopReviewsHandler,
   listTrendingProductsHandler,
   searchPublicCatalogHandler,
   validatePublicCartHandler,
@@ -26,6 +27,7 @@ router.get(
   '/public/shops/:shopIdOrSlug/catalog/:productId',
   getPublicCatalogProductHandler,
 )
+router.get('/public/shops/:shopIdOrSlug/reviews', listShopReviewsHandler)
 router.post('/public/cart/validate', validatePublicCartHandler)
 
 export default router

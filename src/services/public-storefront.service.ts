@@ -2,6 +2,7 @@ import type { Shop } from '@prisma/client'
 
 import prisma from '../lib/prisma'
 import { getDeliveryEtaMinutes } from './delivery-eta.service'
+import { getShopRatingSummary } from './order-review.service'
 import {
   checkInventoryAvailability,
   getInventoryCatalogProduct,
@@ -199,6 +200,29 @@ async function attachLiveEta<T extends Record<string, unknown>>(
   return {
     ...mapped,
     liveEstimatedDeliveryMinutes: eta.etaMinutes,
+  }
+}
+
+/**
+ * Attaches the average-rating + review-count pair to a mapped public shop
+ * DETAIL object (`OrderReview` aggregate grouped by `Shop.id`). Deliberately
+ * only wired into the single-shop detail call sites below (`getPublicShop`,
+ * `listPublicShopCatalog`, `getPublicCatalogProduct` — each resolves exactly
+ * one shop), not `listPublicShops`'s N-shop summary list — an aggregate
+ * query per shop in a list render is a cost worth avoiding the same way
+ * `attachLiveEta`'s `'fast'` mode avoids per-shop external calls, and the
+ * shop list card isn't where a rating needs to show today.
+ */
+async function attachRatingSummary<T extends Record<string, unknown>>(
+  shop: Shop,
+  mapped: T,
+): Promise<T & { averageRating: number | null; reviewCount: number }> {
+  const rating = await getShopRatingSummary(shop.id)
+
+  return {
+    ...mapped,
+    averageRating: rating.averageRating,
+    reviewCount: rating.reviewCount,
   }
 }
 
@@ -596,11 +620,9 @@ async function getPublicShop(
   customerCoordinates?: CustomerCoordinates | null,
 ) {
   const shop = await getMappedPublicShop(shopIdOrSlug)
-  const item = await attachLiveEta(
+  const item = await attachRatingSummary(
     shop,
-    mapPublicShopDetail(shop),
-    customerCoordinates,
-    'full',
+    await attachLiveEta(shop, mapPublicShopDetail(shop), customerCoordinates, 'full'),
   )
 
   return { item }
@@ -624,11 +646,9 @@ async function listPublicShopCatalog(
     sort: query.sort,
     language: query.lang,
   })
-  const item = await attachLiveEta(
+  const item = await attachRatingSummary(
     shop,
-    mapPublicShopDetail(shop),
-    customerCoordinates,
-    'full',
+    await attachLiveEta(shop, mapPublicShopDetail(shop), customerCoordinates, 'full'),
   )
 
   return {
@@ -653,11 +673,9 @@ async function getPublicCatalogProduct(
     productId,
     language,
   })
-  const shopDetail = await attachLiveEta(
+  const shopDetail = await attachRatingSummary(
     shop,
-    mapPublicShopDetail(shop),
-    customerCoordinates,
-    'full',
+    await attachLiveEta(shop, mapPublicShopDetail(shop), customerCoordinates, 'full'),
   )
 
   return {

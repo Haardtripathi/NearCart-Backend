@@ -3,6 +3,7 @@ import type {
   CustomerProfile,
   Order,
   OrderItem,
+  OrderReview,
   Shop,
   ShopOwnerProfile,
   User,
@@ -45,6 +46,7 @@ type OrderSource = Order & {
   inventorySyncStatus?: string | null
   inventorySyncError?: string | null
   inventoryLastSyncedAt?: Date | null
+  review?: OrderReview | null
 }
 
 function mapAddress(address: Address) {
@@ -167,6 +169,15 @@ function mapOrderItem(item: OrderItemSource) {
   }
 }
 
+function mapOrderReviewSummary(review: OrderReview) {
+  return {
+    id: review.id,
+    rating: review.rating,
+    comment: review.comment,
+    createdAt: review.createdAt,
+  }
+}
+
 function mapOrder(order: OrderSource) {
   return {
     id: order.id,
@@ -212,6 +223,13 @@ function mapOrder(order: OrderSource) {
     createdAt: order.createdAt,
     updatedAt: order.updatedAt,
     items: Array.isArray(order.items) ? order.items.map(mapOrderItem) : [],
+    // Present only when the caller's query included the `review` relation
+    // (see `getOrderById` in orders.service.ts) — `undefined` in `order`
+    // (relation not queried) maps to `null` here too, same as `review: null`
+    // (queried, none exists), so the frontend can't tell those two apart
+    // from this field alone. That's fine: every call site that cares about
+    // review state always includes the relation.
+    review: order.review ? mapOrderReviewSummary(order.review) : null,
   }
 }
 

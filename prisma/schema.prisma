@@ -73,6 +73,7 @@ model User {
   refreshTokens    RefreshToken[]
   deviceTokens     DeviceToken[]
   shopOwnerProfile ShopOwnerProfile?
+  orderReviews     OrderReview[]
 }
 
 model CustomerProfile {
@@ -134,6 +135,7 @@ model Shop {
   updatedAt      DateTime           @updatedAt
   memberships    ShopMembership[]
   orders         Order[]
+  reviews        OrderReview[]
   ownerProfile   ShopOwnerProfile   @relation(fields: [ownerProfileId], references: [id], onDelete: Cascade)
 
   @@index([ownerProfileId])
@@ -240,6 +242,7 @@ model Order {
   customerUser         User?         @relation("CustomerOrders", fields: [customerUserId], references: [id], onDelete: SetNull)
   items                OrderItem[]
   shop                 Shop?         @relation(fields: [shopRecordId], references: [id], onDelete: SetNull)
+  review               OrderReview?
 
   @@index([createdAt])
   @@index([customerUserId])
@@ -268,6 +271,33 @@ model OrderItem {
   order          Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
   @@index([orderId])
+}
+
+// A customer's rating/review of one completed order. One-to-one with Order
+// (@unique orderId — enforced again at the service layer with a 409 before
+// insert, but the DB constraint is the real backstop). `shopId` is
+// deliberately the real `Shop.id` FK (not the slug-style denormalized
+// `Order.shopId`/nullable `Order.shopRecordId` split) — a review can only be
+// created for an order that already has a resolved `shopRecordId` (checkout
+// requires a mapped shop), so there's no null case to design around here,
+// and keeping it a plain required FK makes the shop-aggregate query
+// (`_avg`/`_count` grouped by shopId for the public shop-detail response) a
+// direct index lookup instead of a join through Order.
+model OrderReview {
+  id         String   @id @default(cuid())
+  orderId    String   @unique
+  customerId String
+  shopId     String
+  rating     Int
+  comment    String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  order      Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  customer   User     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  shop       Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  @@index([shopId])
+  @@index([customerId])
 }
 
 model AuditLog {

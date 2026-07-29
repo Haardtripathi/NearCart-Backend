@@ -6,7 +6,9 @@ import {
   createOrder,
   getOrderById,
 } from '../services/orders.service'
+import { createOrderReview } from '../services/order-review.service'
 import { checkoutPayloadSchema } from '../validation/orders.validation'
+import { createOrderReviewSchema } from '../validation/order-review.validation'
 
 async function createOrderHandler(
   request: Request,
@@ -79,4 +81,33 @@ async function cancelOrderHandler(
   }
 }
 
-export { cancelOrderHandler, createOrderHandler, getOrderByIdHandler }
+async function createOrderReviewHandler(
+  request: Request,
+  response: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const payload = createOrderReviewSchema.parse(request.body)
+    const review = await createOrderReview(payload, {
+      orderId: request.params.orderId as string,
+      customerUserId: request.auth!.userId,
+    })
+
+    response.status(201).json({
+      item: review,
+      meta: {
+        source: 'database',
+        timestamp: getTimestamp(),
+      },
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+export {
+  cancelOrderHandler,
+  createOrderHandler,
+  createOrderReviewHandler,
+  getOrderByIdHandler,
+}

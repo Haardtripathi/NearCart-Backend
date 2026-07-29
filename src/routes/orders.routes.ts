@@ -3,6 +3,7 @@ import { Router } from 'express'
 import {
   cancelOrderHandler,
   createOrderHandler,
+  createOrderReviewHandler,
   getOrderByIdHandler,
 } from '../controllers/orders.controller'
 import { requireAuth, requireRole } from '../middleware/auth'
@@ -24,5 +25,11 @@ router.get('/orders/:orderId', requireAuth, getOrderByIdHandler)
 // PENDING_CONFIRMATION-only business rule is what actually limits this to
 // realistically being used by the customer before a shop has acted.
 router.post('/orders/:orderId/cancel', requireAuth, cancelOrderHandler)
+router.post(
+  '/orders/:orderId/review',
+  requireAuth,
+  requireRole('CUSTOMER'),
+  createOrderReviewHandler,
+)
 
 export default router

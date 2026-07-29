@@ -10,6 +10,7 @@ import {
   searchPublicCatalog,
   validatePublicCart,
 } from '../services/public-storefront.service'
+import { listShopReviews } from '../services/order-review.service'
 import {
   publicCartValidationSchema,
   publicSearchQuerySchema,
@@ -18,6 +19,7 @@ import {
   shopGeoQuerySchema,
   shopListQuerySchema,
 } from '../validation/public.validation'
+import { shopReviewsQuerySchema } from '../validation/order-review.validation'
 import { getTimestamp } from '../utils/time'
 
 async function listPublicShopsHandler(
@@ -206,6 +208,28 @@ async function getPublicCatalogProductHandler(
   }
 }
 
+async function listShopReviewsHandler(
+  request: Request,
+  response: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const query = shopReviewsQuerySchema.parse(request.query)
+    const result = await listShopReviews(request.params.shopIdOrSlug as string, query)
+
+    response.status(200).json({
+      ...result,
+      meta: {
+        ...result.meta,
+        source: 'database',
+        timestamp: getTimestamp(),
+      },
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
 async function validatePublicCartHandler(
   request: Request,
   response: Response,
@@ -233,6 +257,7 @@ export {
   listPublicShopCatalogHandler,
   listPublicShopCategoriesHandler,
   listPublicShopsHandler,
+  listShopReviewsHandler,
   listTrendingProductsHandler,
   searchPublicCatalogHandler,
   validatePublicCartHandler,

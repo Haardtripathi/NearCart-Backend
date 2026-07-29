@@ -227,7 +227,21 @@ async function inventoryRequest<T>(
     })
 
     if (!response.ok) {
-      throw createHttpError(502, await readInventoryError(response))
+      const message = await readInventoryError(response)
+
+      // Pass through the upstream bridge's own 4xx (e.g. 404 for a product/org that doesn't
+      // exist, 400 for a bad request) instead of flattening it to a generic 502 — found via
+      // live testing 2026-07-29: `GET /public/shops/:slug/catalog/:productId` for a nonexistent
+      // product returned 502 "bridge unavailable" instead of 404, which is both misleading (the
+      // bridge is fine; the product just isn't there) and breaks callers that branch on status
+      // code. Only a genuine 5xx/unexpected response from the bridge should still collapse to a
+      // 502 here, since NearCart shouldn't forward Inventory's own internal error details to its
+      // customers.
+      if (response.status >= 400 && response.status < 500) {
+        throw createHttpError(response.status, message)
+      }
+
+      throw createHttpError(502, message)
     }
 
     const payload = (await response.json()) as InventoryApiEnvelope<T>

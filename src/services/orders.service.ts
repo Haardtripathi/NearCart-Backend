@@ -311,7 +311,7 @@ async function createOrder(
 
 type OrderWithItems = Prisma.OrderGetPayload<{ include: { items: true } }>
 type OrderWithRelations = Prisma.OrderGetPayload<{
-  include: { items: true; shop: true }
+  include: { items: true; shop: true; review: true }
 }>
 
 /**
@@ -436,7 +436,7 @@ async function refreshOrderStatusFromInventory(
     return await prisma.order.update({
       where: { id: order.id },
       data: updateData,
-      include: { items: true, shop: true },
+      include: { items: true, shop: true, review: true },
     })
   } catch (error) {
     console.warn(
@@ -478,6 +478,7 @@ async function getOrderById(orderId: string, accessContext: OrderAccessContext) 
     include: {
       items: true,
       shop: true,
+      review: true,
     },
   })
 
@@ -516,6 +517,7 @@ async function cancelOrder(orderId: string, accessContext: OrderAccessContext) {
     include: {
       items: true,
       shop: true,
+      review: true,
     },
   })
 
@@ -537,7 +539,7 @@ async function cancelOrder(orderId: string, accessContext: OrderAccessContext) {
   let finalOrder = await prisma.order.update({
     where: { id: order.id },
     data: { status: 'CANCELLED' },
-    include: { items: true, shop: true },
+    include: { items: true, shop: true, review: true },
   })
 
   const shouldCancelInInventory =
@@ -559,7 +561,7 @@ async function cancelOrder(orderId: string, accessContext: OrderAccessContext) {
           inventorySyncError: null,
           inventoryLastSyncedAt: new Date(),
         },
-        include: { items: true, shop: true },
+        include: { items: true, shop: true, review: true },
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error'
@@ -576,7 +578,7 @@ async function cancelOrder(orderId: string, accessContext: OrderAccessContext) {
           inventorySyncError: `Cancel was not reflected in inventory: ${message}`.slice(0, 500),
           inventoryLastSyncedAt: new Date(),
         },
-        include: { items: true, shop: true },
+        include: { items: true, shop: true, review: true },
       })
     }
   }
