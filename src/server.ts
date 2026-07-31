@@ -8,7 +8,17 @@ import { ensureBootstrapAdmin } from './services/bootstrap.service'
 async function startServer(): Promise<void> {
   try {
     await ensureBootstrapAdmin()
+  } catch (error) {
+    // Don't let a transient DB/network hiccup during admin bootstrap take down the whole
+    // process — the HTTP server (health checks, and any DB-independent routes) should still
+    // come up. ensureBootstrapAdmin() is safe to retry on a later restart.
+    console.error(
+      '[NearKart] Admin bootstrap failed (continuing to start the server anyway):',
+      error,
+    )
+  }
 
+  try {
     const server = app.listen(env.port, () => {
       console.log(`${env.appName} listening on port ${env.port}`)
     })
