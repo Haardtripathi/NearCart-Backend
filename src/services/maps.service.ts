@@ -2,6 +2,7 @@ import env from '../config/env'
 import { createHttpError } from '../utils/httpError'
 
 const GOOGLE_MAPS_BASE_URL = 'https://maps.googleapis.com/maps/api'
+const GOOGLE_PLACES_BASE_URL = 'https://places.googleapis.com/v1'
 
 interface GoogleAddressComponent {
   long_name: string
@@ -26,19 +27,23 @@ interface GoogleGeocodeResponse {
   results: GoogleGeocodeResult[]
 }
 
-interface GoogleAutocompletePrediction {
-  place_id: string
-  description: string
-  structured_formatting?: {
-    main_text?: string
-    secondary_text?: string
+interface GooglePlaceText {
+  text?: string
+}
+
+interface GooglePlacePrediction {
+  placeId?: string
+  text?: GooglePlaceText
+  structuredFormat?: {
+    mainText?: GooglePlaceText
+    secondaryText?: GooglePlaceText
   }
 }
 
-interface GoogleAutocompleteResponse {
-  status: string
-  error_message?: string
-  predictions: GoogleAutocompletePrediction[]
+interface GooglePlacesAutocompleteResponse {
+  suggestions?: {
+    placePrediction?: GooglePlacePrediction
+  }[]
 }
 
 function assertMapsConfigured(): void {
@@ -90,6 +95,41 @@ async function callGoogleMaps<T extends { status: string; error_message?: string
   return payload
 }
 
+async function callGooglePlaces<T>(
+  path: string,
+  body: Record<string, unknown>,
+): Promise<T> {
+  assertMapsConfigured()
+
+  let response: Response
+
+  try {
+    response = await fetch(`${GOOGLE_PLACES_BASE_URL}${path}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': env.googleMapsApiKey,
+      },
+      body: JSON.stringify(body),
+    })
+  } catch {
+    throw createHttpError(502, 'Could not reach Google Places right now.')
+  }
+
+  const payload = (await response.json().catch(() => null)) as
+    | (T & { error?: { message?: string } })
+    | null
+
+  if (!response.ok) {
+    throw createHttpError(
+      502,
+      payload?.error?.message || `Google Places request failed with ${response.status}.`,
+    )
+  }
+
+  return payload as T
+}
+
 function findComponent(
   components: GoogleAddressComponent[],
   type: string,
@@ -134,23 +174,30 @@ async function autocompletePlaces(input: {
   language?: string
   regionBias?: string
 }) {
-  const payload = await callGoogleMaps<GoogleAutocompleteResponse>(
-    '/place/autocomplete/json',
+  const payload = await callGooglePlaces<GooglePlacesAutocompleteResponse>(
+    '/places:autocomplete',
     {
       input: input.query,
-      sessiontoken: input.sessionToken,
-      language: input.language,
-      components: input.regionBias ? `country:${input.regionBias}` : undefined,
+      sessionToken: input.sessionToken,
+      languageCode: input.language,
+      includedRegionCodes: input.regionBias ? [input.regionBias] : undefined,
     },
   )
 
   return {
-    predictions: payload.predictions.map((prediction) => ({
-      placeId: prediction.place_id,
-      description: prediction.description,
-      mainText: prediction.structured_formatting?.main_text ?? prediction.description,
-      secondaryText: prediction.structured_formatting?.secondary_text ?? null,
-    })),
+    predictions: (payload.suggestions ?? [])
+      .map((suggestion) => suggestion.placePrediction)
+      .filter((prediction): prediction is GooglePlacePrediction => Boolean(prediction?.placeId))
+      .map((prediction) => {
+        const description = prediction.text?.text ?? ''
+
+        return {
+          placeId: prediction.placeId as string,
+          description,
+          mainText: prediction.structuredFormat?.mainText?.text ?? description,
+          secondaryText: prediction.structuredFormat?.secondaryText?.text ?? null,
+        }
+      }),
   }
 }
 
