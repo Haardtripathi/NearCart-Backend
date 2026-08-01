@@ -99,6 +99,12 @@ const env = {
   ),
   otpMaxVerifyAttempts: parseInteger(process.env.OTP_MAX_VERIFY_ATTEMPTS, 5),
   redisUrl: process.env.REDIS_URL || '',
+  // Preferred over raw SMTP below when set — see config/mailer.ts. Added 2026-08-01 after
+  // confirming live in prod (same Gmail SMTP setup as NearCart-Inventory) that raw SMTP to
+  // smtp.gmail.com:587 hangs for ~2 minutes before failing, almost certainly because the hosting
+  // provider blocks outbound SMTP egress. Resend's HTTP API isn't affected by that class of block.
+  resendApiKey: process.env.RESEND_API_KEY || '',
+  resendFrom: process.env.RESEND_FROM || 'NearKart <onboarding@resend.dev>',
   smtpHost: process.env.SMTP_HOST || '',
   smtpPort: parsePort(process.env.SMTP_PORT, 587),
   smtpUser: process.env.SMTP_USER || '',
