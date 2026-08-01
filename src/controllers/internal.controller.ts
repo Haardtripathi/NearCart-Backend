@@ -14,6 +14,7 @@ const orderEventSchema = z.object({
     'OUT_FOR_DELIVERY',
     'DELIVERED',
     'AUTO_CANCELLED',
+    'CANCELLED',
   ]),
   assignedDriver: z
     .object({

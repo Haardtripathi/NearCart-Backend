@@ -607,6 +607,7 @@ interface InventoryOrderEventInput {
     | 'OUT_FOR_DELIVERY'
     | 'DELIVERED'
     | 'AUTO_CANCELLED'
+    | 'CANCELLED'
   assignedDriver?: { fullName: string; phone: string; vehicleType: string } | null
 }
 
@@ -629,6 +630,10 @@ const ORDER_EVENT_NOTIFICATION_COPY: Record<
   AUTO_CANCELLED: {
     title: 'Order cancelled',
     body: 'The shop did not confirm your order in time, so it was automatically cancelled.',
+  },
+  CANCELLED: {
+    title: 'Order cancelled',
+    body: 'The shop has cancelled your order.',
   },
 }
 
