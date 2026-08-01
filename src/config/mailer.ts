@@ -89,15 +89,15 @@ interface SendMailInput {
  * mail provider, while still exercising the rest of the OTP flow.
  */
 async function sendMail(input: SendMailInput): Promise<{ delivered: boolean }> {
-  if (env.resendApiKey) {
-    return sendMailViaResend(input)
-  }
-
   const mailer = getMailTransporter()
 
   if (!mailer) {
+    if (env.resendApiKey) {
+      return sendMailViaResend(input)
+    }
+
     console.warn(
-      `[NearKart] Neither RESEND_API_KEY nor SMTP is configured — logging email instead of sending.\n` +
+      `[NearKart] Neither SMTP nor RESEND_API_KEY is configured — logging email instead of sending.\n` +
         `  To: ${input.to}\n  Subject: ${input.subject}\n  Body: ${input.text}`,
     )
     return { delivered: false }
