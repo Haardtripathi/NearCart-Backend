@@ -13,6 +13,7 @@ import {
 import { createHttpError } from '../utils/httpError'
 import { haversineDistanceKm } from '../utils/geo'
 import { mapOrder } from '../utils/serializers'
+import { getShopTodayStatus } from '../utils/shop-availability'
 import { normalizeOptionalString } from '../utils/user'
 import type { CheckoutPayloadInput } from '../validation/orders.validation'
 
@@ -189,6 +190,32 @@ async function assertCustomerIsVerified(customerUserId: string): Promise<void> {
   }
 }
 
+/**
+ * Blocks checkout unless the shop owner has explicitly confirmed their shop is open TODAY (see
+ * `src/utils/shop-availability.ts`). A shop that's never said anything today, or said so on a
+ * previous day, reads as "PENDING_CONFIRMATION" — customers must not be able to place orders a
+ * shop hasn't actually committed to fulfilling.
+ */
+function assertShopIsOpenToday(
+  shop: Pick<Shop, 'name' | 'isOpenToday' | 'todayStatusReason' | 'todayStatusUpdatedAt'>,
+): void {
+  const todayStatus = getShopTodayStatus(shop)
+
+  if (todayStatus === 'OPEN') {
+    return
+  }
+
+  const message =
+    todayStatus === 'PENDING_CONFIRMATION'
+      ? "This shop hasn't confirmed today's availability yet — check back soon."
+      : `This shop is closed today${shop.todayStatusReason ? ` (${shop.todayStatusReason})` : ''}`
+
+  throw createHttpError(403, message, {
+    code: 'SHOP_NOT_OPEN_TODAY',
+    data: { todayStatus, reason: shop.todayStatusReason ?? null },
+  })
+}
+
 async function createOrder(
   payload: CheckoutPayloadInput,
   options: CreateOrderOptions,
@@ -205,6 +232,8 @@ async function createOrder(
     items: payload.items,
   })
   const { shop } = checkoutSnapshot
+
+  assertShopIsOpenToday(shop)
 
   if (
     shop.minimumOrderAmount > 0 &&
@@ -259,6 +288,8 @@ async function createOrder(
         paymentMethod: payload.paymentMethod,
         subtotal: checkoutSnapshot.summary.subtotal,
         deliveryFee: checkoutSnapshot.summary.deliveryFee,
+        weatherSurchargeFee: checkoutSnapshot.summary.weatherSurchargeFee,
+        weatherCondition: checkoutSnapshot.summary.weatherCondition,
         platformFee: 0,
         totalAmount: checkoutSnapshot.summary.totalAmount,
         createdAt: placedAt,

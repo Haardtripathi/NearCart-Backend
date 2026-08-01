@@ -9,6 +9,7 @@ import type {
   User,
 } from '@prisma/client'
 
+import { getShopTodayStatus } from './shop-availability'
 import { getDashboardPathForRole } from './user'
 
 type SafeUserSource = User & {
@@ -143,6 +144,10 @@ function mapShop(shop: ShopSource) {
     estimatedDeliveryMinutes: shop.estimatedDeliveryMinutes,
     serviceRadiusKm: shop.serviceRadiusKm,
     lastCatalogSyncAt: shop.lastCatalogSyncAt,
+    isOpenToday: shop.isOpenToday,
+    todayStatusReason: shop.todayStatusReason,
+    todayStatusUpdatedAt: shop.todayStatusUpdatedAt,
+    todayStatus: getShopTodayStatus(shop),
     isActive: shop.isActive,
     approvalStatus: shop.approvalStatus,
     createdAt: shop.createdAt,
@@ -205,6 +210,8 @@ function mapOrder(order: OrderSource) {
     notes: order.notes,
     subtotal: order.subtotal,
     deliveryFee: order.deliveryFee,
+    weatherSurchargeFee: order.weatherSurchargeFee,
+    weatherCondition: order.weatherCondition,
     platformFee: order.platformFee,
     totalAmount: order.totalAmount,
     placedAt: order.placedAt,

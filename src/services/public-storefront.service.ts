@@ -12,7 +12,9 @@ import {
   type InventoryCatalogItem,
   type InventoryCatalogResponse,
 } from './inventory-client.service'
+import { getWeatherFeeForCondition, getWeatherImpact } from './weather.service'
 import { createHttpError } from '../utils/httpError'
+import { getShopTodayStatus } from '../utils/shop-availability'
 import type {
   CartValidationItemInput,
   PublicCartValidationInput,
@@ -146,6 +148,8 @@ function mapPublicShopSummary(shop: Shop) {
     deliveryFee: shop.deliveryFeeDefault,
     deliveryEnabled: shop.deliveryEnabled,
     isOpenNow: isShopOpenNow(shop),
+    todayStatus: getShopTodayStatus(shop),
+    todayStatusReason: shop.todayStatusReason,
   }
 }
 
@@ -368,7 +372,21 @@ async function buildValidatedCartSnapshot(
     0,
   )
   const deliveryFee = shop.deliveryEnabled ? shop.deliveryFeeDefault : 0
-  const totalAmount = subtotal + deliveryFee
+
+  // Weather is only worth checking for a delivery that's actually happening (deliveryEnabled)
+  // and only resolvable when the shop has real coordinates — otherwise there's nothing to charge
+  // against, same fail-safe posture as `getWeatherImpact`'s own failure paths (0 surcharge,
+  // condition 'unknown'). Called at most once per validate/checkout call here, and the resulting
+  // `condition` (not a second call) is what `getWeatherFeeForCondition` derives the fee from.
+  let weatherCondition = 'unknown'
+
+  if (shop.deliveryEnabled && shop.latitude != null && shop.longitude != null) {
+    const weatherImpact = await getWeatherImpact(shop.latitude, shop.longitude)
+    weatherCondition = weatherImpact.condition
+  }
+
+  const weatherSurchargeFee = getWeatherFeeForCondition(weatherCondition)
+  const totalAmount = subtotal + deliveryFee + weatherSurchargeFee
 
   return {
     shop,
@@ -381,6 +399,8 @@ async function buildValidatedCartSnapshot(
       currencyCode: inventoryResult.shopInventory.organization.currencyCode,
       subtotal,
       deliveryFee,
+      weatherSurchargeFee,
+      weatherCondition,
       totalAmount,
       itemCount: appliedItems.reduce((total, item) => total + item.quantity, 0),
       validCount: validItems.length,

@@ -61,18 +61,29 @@ const updateShopSchema = createShopSchema
     'At least one shop field is required',
   )
 
+// `reason` only means anything when `isOpen === false` (see `shop-owner.service.ts`'s
+// `updateShopTodayStatus`, which clears it whenever `isOpen === true`) — free text, shop owner's
+// choice (e.g. "Holiday"), so no enum/min-length constraint beyond a sane upper bound.
+const updateShopTodayStatusSchema = z.object({
+  isOpen: z.boolean(),
+  reason: z.string().trim().max(200).optional().or(z.literal('')),
+})
+
 type UpdateShopOwnerProfileInput = z.infer<typeof updateShopOwnerProfileSchema>
 type CreateShopInput = z.infer<typeof createShopSchema>
 type UpdateShopInput = z.infer<typeof updateShopSchema>
+type UpdateShopTodayStatusInput = z.infer<typeof updateShopTodayStatusSchema>
 
 export {
   createShopSchema,
   updateShopOwnerProfileSchema,
   updateShopSchema,
+  updateShopTodayStatusSchema,
 }
 
 export type {
   CreateShopInput,
   UpdateShopInput,
   UpdateShopOwnerProfileInput,
+  UpdateShopTodayStatusInput,
 }

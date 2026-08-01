@@ -97,5 +97,27 @@ async function getWeatherImpact(
   }
 }
 
-export { getWeatherImpact }
+// Flat delivery surcharge (in rupees, matching every other money field in this backend which is
+// stored/returned as an Int) for bad-weather deliveries — kept in this file, deriving from the
+// SAME `SEVERE_CONDITIONS`/`MODERATE_CONDITIONS` sets above, so the condition->severity mapping
+// has exactly one source of truth shared by the ETA multiplier (`conditionToImpact`) and this
+// fee. Anything outside those two sets — including the `STUB_CONDITION`/`'unknown'` fallback used
+// on every failure/unconfigured path above — charges nothing, mirroring this file's existing
+// fail-safe posture: a weather hiccup must never cost the customer money.
+const SEVERE_WEATHER_SURCHARGE = 40
+const MODERATE_WEATHER_SURCHARGE = 20
+
+function getWeatherFeeForCondition(condition: string): number {
+  if (SEVERE_CONDITIONS.has(condition)) {
+    return SEVERE_WEATHER_SURCHARGE
+  }
+
+  if (MODERATE_CONDITIONS.has(condition)) {
+    return MODERATE_WEATHER_SURCHARGE
+  }
+
+  return 0
+}
+
+export { getWeatherFeeForCondition, getWeatherImpact }
 export type { WeatherImpact }

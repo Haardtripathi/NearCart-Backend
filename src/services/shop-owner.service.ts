@@ -9,11 +9,13 @@ import {
 } from '../utils/serializers'
 import { slugify } from '../utils/slug'
 import { createHttpError } from '../utils/httpError'
+import { getShopTodayStatus } from '../utils/shop-availability'
 import { normalizeOptionalString } from '../utils/user'
 import type {
   CreateShopInput,
   UpdateShopInput,
   UpdateShopOwnerProfileInput,
+  UpdateShopTodayStatusInput,
 } from '../validation/shop-owner.validation'
 
 const shopOwnerUserInclude = {
@@ -356,6 +358,54 @@ async function updateShop(
   }
 }
 
+/**
+ * Shop owner's daily open/closed confirmation. `reason` is only stored when `isOpen === false`
+ * (an explicit close reason like "Holiday") — flipping back open always clears any stale reason
+ * from a previous closure, so a re-opened shop never carries a leftover "(Holiday)" caption.
+ * `todayStatusUpdatedAt` is stamped with the current time on every call, which is exactly what
+ * `getShopTodayStatus` needs to tell "confirmed today" apart from "confirmed some previous day."
+ */
+async function updateShopTodayStatus(
+  userId: string,
+  shopId: string,
+  payload: UpdateShopTodayStatusInput,
+) {
+  const user = await getShopOwnerUser(userId)
+
+  const existingShop = await prisma.shop.findFirst({
+    where: {
+      id: shopId,
+      ownerProfileId: user.shopOwnerProfile.id,
+    },
+  })
+
+  if (!existingShop) {
+    throw createHttpError(404, 'Shop not found')
+  }
+
+  const shop = await prisma.shop.update({
+    where: {
+      id: shopId,
+    },
+    data: {
+      isOpenToday: payload.isOpen,
+      todayStatusReason: payload.isOpen
+        ? null
+        : normalizeOptionalString(payload.reason),
+      todayStatusUpdatedAt: new Date(),
+    },
+  })
+
+  // Deliberately flat (not this file's usual `{ item, meta }` wrapping) — matches the exact
+  // contract the frontend was built against: `{ todayStatus, todayStatusReason,
+  // todayStatusUpdatedAt }` at the response's top level.
+  return {
+    todayStatus: getShopTodayStatus(shop),
+    todayStatusReason: shop.todayStatusReason,
+    todayStatusUpdatedAt: shop.todayStatusUpdatedAt,
+  }
+}
+
 // Ownership check shared by anything mutating a specific shop outside `updateShop` itself — the
 // new logo-upload route (uploads.controller.ts) needs the same 404-if-not-owned guard without
 // duplicating the `getShopOwnerUser` + `prisma.shop.findFirst` pair inline.
@@ -383,4 +433,5 @@ export {
   listShopOwnerShops,
   updateShop,
   updateShopOwnerProfile,
+  updateShopTodayStatus,
 }

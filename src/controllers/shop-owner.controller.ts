@@ -8,11 +8,13 @@ import {
   listShopOwnerShops,
   updateShop,
   updateShopOwnerProfile,
+  updateShopTodayStatus,
 } from '../services/shop-owner.service'
 import {
   createShopSchema,
   updateShopOwnerProfileSchema,
   updateShopSchema,
+  updateShopTodayStatusSchema,
 } from '../validation/shop-owner.validation'
 
 async function getShopOwnerProfileHandler(
@@ -109,6 +111,25 @@ async function updateShopHandler(
   }
 }
 
+async function updateShopTodayStatusHandler(
+  request: Request,
+  response: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const payload = updateShopTodayStatusSchema.parse(request.body)
+    const result = await updateShopTodayStatus(
+      request.auth!.userId,
+      request.params.shopId as string,
+      payload,
+    )
+
+    response.status(200).json(result)
+  } catch (error) {
+    next(error)
+  }
+}
+
 export {
   createShopHandler,
   getShopOwnerProfileHandler,
@@ -116,4 +137,5 @@ export {
   listShopOwnerShopsHandler,
   updateShopHandler,
   updateShopOwnerProfileHandler,
+  updateShopTodayStatusHandler,
 }

@@ -129,6 +129,13 @@ model Shop {
   estimatedDeliveryMinutes Int?
   serviceRadiusKm Float?
   lastCatalogSyncAt DateTime?
+  // Daily open/closed confirmation — null isOpenToday / null todayStatusUpdatedAt means the
+  // shop owner hasn't confirmed today's availability yet ("PENDING_CONFIRMATION"). See
+  // `src/utils/shop-availability.ts`'s `getShopTodayStatus` for the tri-state derivation
+  // (reuses the UTC-day-boundary convention from `orders.service.ts`'s `createOrderNumber`).
+  isOpenToday       Boolean?
+  todayStatusReason String?
+  todayStatusUpdatedAt DateTime?
   isActive       Boolean            @default(true)
   approvalStatus ShopApprovalStatus @default(PENDING)
   createdAt      DateTime           @default(now())
@@ -227,6 +234,8 @@ model Order {
   notes                String?
   subtotal             Int
   deliveryFee          Int           @default(0)
+  weatherSurchargeFee  Int           @default(0)
+  weatherCondition     String?
   platformFee          Int           @default(0)
   totalAmount          Int
   placedAt             DateTime      @default(now())
