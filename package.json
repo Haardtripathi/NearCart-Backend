@@ -50,5 +50,13 @@
     "prisma": "^7.6.0",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3"
+  },
+  "allowScripts": {
+    "@firebase/util@1.15.1": true,
+    "@prisma/engines@7.6.0": true,
+    "bcrypt@6.0.0": true,
+    "esbuild@0.27.7": true,
+    "prisma@7.6.0": true,
+    "protobufjs@7.6.5": true
   }
 }
