@@ -22,8 +22,8 @@ const checkoutPayloadSchema = z.object({
   // delivery address) — lets service-area gating still run for that case.
   // Ignored when a saved addressId is supplied (that address's own
   // latitude/longitude is used instead).
-  latitude: z.number().min(-90).max(90).optional(),
-  longitude: z.number().min(-180).max(180).optional(),
+  latitude: z.number().min(-90).max(90).optional().nullable(),
+  longitude: z.number().min(-180).max(180).optional().nullable(),
   notes: z.string().trim().optional().default(''),
   paymentMethod: z.enum(['COD', 'ONLINE', 'PAY_ON_PICKUP']),
   items: z
