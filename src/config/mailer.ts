@@ -33,9 +33,46 @@ function getMailTransporter(): Transporter | null {
       env.smtpUser && env.smtpPass
         ? { user: env.smtpUser, pass: env.smtpPass }
         : undefined,
+    // Bug found 2026-08-01: with no explicit timeout, nodemailer's default connectionTimeout is
+    // 2 minutes — confirmed live in prod (a hung SMTP connection to smtp.gmail.com:587, almost
+    // certainly blocked by the hosting provider's egress rules, took exactly ~2 minutes to fail).
+    // Failing fast doesn't fix SMTP being blocked, but stops a single bad send from hanging this
+    // long. See sendMail() below — Resend is now preferred when configured, which sidesteps this
+    // entirely.
+    connectionTimeout: 10_000,
+    greetingTimeout: 10_000,
+    socketTimeout: 10_000,
   })
 
   return transporter
+}
+
+const RESEND_API_URL = 'https://api.resend.com/emails'
+
+async function sendMailViaResend(input: SendMailInput): Promise<{ delivered: boolean }> {
+  const response = await fetch(RESEND_API_URL, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${env.resendApiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      from: env.resendFrom,
+      to: [input.to],
+      subject: input.subject,
+      html: input.html,
+      text: input.text,
+    }),
+    signal: AbortSignal.timeout(10_000),
+  })
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => '')
+    console.error(`[NearKart] Resend API request failed with status ${response.status}: ${body}`)
+    throw createHttpError(502, 'Failed to send email. Please try again shortly.')
+  }
+
+  return { delivered: true }
 }
 
 interface SendMailInput {
@@ -52,11 +89,15 @@ interface SendMailInput {
  * mail provider, while still exercising the rest of the OTP flow.
  */
 async function sendMail(input: SendMailInput): Promise<{ delivered: boolean }> {
+  if (env.resendApiKey) {
+    return sendMailViaResend(input)
+  }
+
   const mailer = getMailTransporter()
 
   if (!mailer) {
     console.warn(
-      `[NearKart] SMTP is not configured — logging email instead of sending.\n` +
+      `[NearKart] Neither RESEND_API_KEY nor SMTP is configured — logging email instead of sending.\n` +
         `  To: ${input.to}\n  Subject: ${input.subject}\n  Body: ${input.text}`,
     )
     return { delivered: false }
