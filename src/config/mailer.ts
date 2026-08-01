@@ -47,6 +47,58 @@ function getMailTransporter(): Transporter | null {
   return transporter
 }
 
+const BREVO_API_URL = 'https://api.brevo.com/v3/smtp/email'
+
+/**
+ * Parses "Display Name <email@domain>" into separate fields — Brevo's HTTP API wants them
+ * split, unlike nodemailer/Resend which accept the combined string directly.
+ */
+function parseFromAddress(raw: string): { name?: string; email: string } {
+  const match = raw.match(/^(.*)<(.+)>$/)
+
+  if (!match) {
+    return { email: raw.trim() }
+  }
+
+  const name = match[1]!.trim()
+  const email = match[2]!.trim()
+  return name ? { name, email } : { email }
+}
+
+/**
+ * Sends via Brevo's HTTP API rather than its own SMTP relay — see BREVO_API_KEY's doc comment in
+ * config/env.ts. Confirmed live 2026-08-01: Brevo's SMTP relay (smtp-relay.brevo.com:587) itself
+ * gets ETIMEDOUT from this exact Render service despite identical credentials working fine on
+ * NearCart-Inventory's service — a real per-service network egress restriction, not a config
+ * issue. A normal HTTPS POST isn't subject to that at all.
+ */
+async function sendMailViaBrevo(input: SendMailInput): Promise<{ delivered: boolean }> {
+  const response = await fetch(BREVO_API_URL, {
+    method: 'POST',
+    headers: {
+      'api-key': env.brevoApiKey,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify({
+      sender: parseFromAddress(env.brevoFrom),
+      to: [{ email: input.to }],
+      subject: input.subject,
+      htmlContent: input.html,
+      textContent: input.text,
+    }),
+    signal: AbortSignal.timeout(10_000),
+  })
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => '')
+    console.error(`[NearKart] Brevo API request failed with status ${response.status}: ${body}`)
+    throw createHttpError(502, 'Failed to send email. Please try again shortly.')
+  }
+
+  return { delivered: true }
+}
+
 const RESEND_API_URL = 'https://api.resend.com/emails'
 
 async function sendMailViaResend(input: SendMailInput): Promise<{ delivered: boolean }> {
@@ -89,6 +141,10 @@ interface SendMailInput {
  * mail provider, while still exercising the rest of the OTP flow.
  */
 async function sendMail(input: SendMailInput): Promise<{ delivered: boolean }> {
+  if (env.brevoApiKey) {
+    return sendMailViaBrevo(input)
+  }
+
   const mailer = getMailTransporter()
 
   if (!mailer) {
@@ -97,7 +153,7 @@ async function sendMail(input: SendMailInput): Promise<{ delivered: boolean }> {
     }
 
     console.warn(
-      `[NearKart] Neither SMTP nor RESEND_API_KEY is configured — logging email instead of sending.\n` +
+      `[NearKart] No email provider configured (BREVO_API_KEY / SMTP / RESEND_API_KEY all unset) — logging email instead of sending.\n` +
         `  To: ${input.to}\n  Subject: ${input.subject}\n  Body: ${input.text}`,
     )
     return { delivered: false }

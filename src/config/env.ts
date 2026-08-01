@@ -99,10 +99,17 @@ const env = {
   ),
   otpMaxVerifyAttempts: parseInteger(process.env.OTP_MAX_VERIFY_ATTEMPTS, 5),
   redisUrl: process.env.REDIS_URL || '',
-  // Preferred over raw SMTP below when set — see config/mailer.ts. Added 2026-08-01 after
-  // confirming live in prod (same Gmail SMTP setup as NearCart-Inventory) that raw SMTP to
-  // smtp.gmail.com:587 hangs for ~2 minutes before failing, almost certainly because the hosting
-  // provider blocks outbound SMTP egress. Resend's HTTP API isn't affected by that class of block.
+  // Highest priority when set — see config/mailer.ts. Added 2026-08-01 after confirming that even
+  // Brevo's own SMTP relay (smtp-relay.brevo.com:587) gets ETIMEDOUT from this exact Render
+  // service despite identical credentials working fine on NearCart-Inventory's service — a real
+  // per-service network egress restriction. Brevo's HTTP API isn't affected since it's a normal
+  // HTTPS call, same reasoning as resendApiKey below but with Brevo's un-restricted-recipient
+  // free tier instead of Resend's own-email-only sandbox.
+  brevoApiKey: process.env.BREVO_API_KEY || '',
+  brevoFrom: process.env.BREVO_FROM || 'NearKart <no-reply@nearkart.local>',
+  // Preferred over raw SMTP below when BREVO_API_KEY is unset — see config/mailer.ts. Resend's
+  // HTTP API isn't affected by SMTP-port blocking either, but its free tier restricts sending to
+  // the account's own email until a domain is verified there.
   resendApiKey: process.env.RESEND_API_KEY || '',
   resendFrom: process.env.RESEND_FROM || 'NearKart <onboarding@resend.dev>',
   smtpHost: process.env.SMTP_HOST || '',
