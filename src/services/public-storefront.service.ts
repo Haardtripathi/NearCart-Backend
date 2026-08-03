@@ -14,6 +14,7 @@ import {
 } from './inventory-client.service'
 import { getWeatherFeeForCondition, getWeatherImpact } from './weather.service'
 import { createHttpError } from '../utils/httpError'
+import { haversineDistanceKm } from '../utils/geo'
 import { getShopTodayStatus } from '../utils/shop-availability'
 import type {
   CartValidationItemInput,
@@ -42,6 +43,12 @@ const PUBLIC_MAPPED_SHOP_WHERE = {
   inventoryOrganizationId: { not: null },
   inventoryBranchId: { not: null },
 }
+
+// Platform default "nearby" radius (km), used when a shop hasn't configured its own
+// `serviceRadiusKm`. Mirrors `DRIVER_MATCH_RADIUS_KM`'s default on the sibling
+// NearCart-Inventory backend (same kind of nearest-match radius), for consistency of what
+// counts as "nearby" across the product.
+const DEFAULT_SHOP_MATCH_RADIUS_KM = 15
 
 // v1 bounded-fan-out tuning — see searchPublicCatalog/listTrendingProducts. No cross-shop
 // search index exists; this trades completeness for a hard ceiling on concurrent outbound
@@ -435,16 +442,56 @@ async function listPublicShops(
     orderBy: [{ createdAt: 'desc' }, { name: 'asc' }],
   })
 
+  // Hyperlocal filtering: only applied when the customer's coordinates are known. Each shop
+  // is only "near" if it's within its own `serviceRadiusKm` (shop-owner-configured), falling
+  // back to `DEFAULT_SHOP_MATCH_RADIUS_KM` when unset. A shop with no coordinates of its own
+  // can't have its distance computed at all, so it's excluded from the geo-filtered result
+  // rather than guessed at — same fail-closed posture as `attachLiveEta`'s distance term,
+  // which just skips the travel-time component instead of erroring. When no customer
+  // coordinates are supplied, behavior is unchanged from before: no filter, no sort, no
+  // `distanceKm` field.
+  let scopedShops: Array<{ shop: Shop; distanceKm: number | null }>
+
+  if (customerCoordinates) {
+    scopedShops = shops
+      .filter((shop) => shop.latitude != null && shop.longitude != null)
+      .map((shop) => ({
+        shop,
+        distanceKm: haversineDistanceKm(
+          customerCoordinates.latitude,
+          customerCoordinates.longitude,
+          shop.latitude as number,
+          shop.longitude as number,
+        ),
+      }))
+      .filter(
+        ({ shop, distanceKm }) =>
+          distanceKm <= (shop.serviceRadiusKm ?? DEFAULT_SHOP_MATCH_RADIUS_KM),
+      )
+      .sort((a, b) => a.distanceKm - b.distanceKm)
+  } else {
+    scopedShops = shops.map((shop) => ({ shop, distanceKm: null }))
+  }
+
   const items = await Promise.all(
-    shops.map((shop) =>
-      attachLiveEta(shop, mapPublicShopSummary(shop), customerCoordinates, 'fast'),
-    ),
+    scopedShops.map(async ({ shop, distanceKm }) => {
+      const mapped = await attachLiveEta(
+        shop,
+        mapPublicShopSummary(shop),
+        customerCoordinates,
+        'fast',
+      )
+
+      return distanceKm != null
+        ? { ...mapped, distanceKm: Number(distanceKm.toFixed(1)) }
+        : mapped
+    }),
   )
 
   return {
     items,
     meta: {
-      total: shops.length,
+      total: items.length,
     },
   }
 }
