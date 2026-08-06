@@ -19,6 +19,7 @@ type SafeUserSource = User & {
 
 type CustomerProfileSource = CustomerProfile & {
   defaultAddress?: Address | null
+  loyaltyPoints?: number
 }
 
 type ShopSource = Shop & {
@@ -47,7 +48,14 @@ type OrderSource = Order & {
   inventorySyncStatus?: string | null
   inventorySyncError?: string | null
   inventoryLastSyncedAt?: Date | null
+  driverName?: string | null
+  driverPhone?: string | null
+  driverVehicleType?: string | null
+  driverAssignedAt?: Date | null
   review?: OrderReview | null
+  couponCode?: string | null
+  discountAmount?: number
+  loyaltyPointsEarned?: number | null
 }
 
 function mapAddress(address: Address) {
@@ -100,6 +108,7 @@ function mapCustomerProfile(profile: CustomerProfileSource) {
     defaultAddress: profile.defaultAddress
       ? mapAddress(profile.defaultAddress)
       : null,
+    loyaltyPoints: profile.loyaltyPoints ?? 0,
   }
 }
 
@@ -213,10 +222,17 @@ function mapOrder(order: OrderSource) {
     weatherSurchargeFee: order.weatherSurchargeFee,
     weatherCondition: order.weatherCondition,
     platformFee: order.platformFee,
+    couponCode: order.couponCode ?? null,
+    discountAmount: order.discountAmount ?? 0,
     totalAmount: order.totalAmount,
+    loyaltyPointsEarned: order.loyaltyPointsEarned ?? null,
     placedAt: order.placedAt,
     acceptedAt: order.acceptedAt,
     deliveredAt: order.deliveredAt,
+    driverName: order.driverName ?? null,
+    driverPhone: order.driverPhone ?? null,
+    driverVehicleType: order.driverVehicleType ?? null,
+    driverAssignedAt: order.driverAssignedAt ?? null,
     // Mirrors the locked business rule in `orders.service.ts`'s
     // `cancelOrder` — a customer can only cancel while the shop hasn't
     // acted on the order yet. Computed here (not stored) so it's always

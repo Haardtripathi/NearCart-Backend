@@ -12,6 +12,12 @@ import {
   updateCustomerProfile,
 } from '../services/customer.service'
 import {
+  addFavoriteShop,
+  listFavoriteShopIds,
+  listFavoriteShops,
+  removeFavoriteShop,
+} from '../services/favorite-shops.service'
+import {
   createAddressSchema,
   registerDeviceTokenSchema,
   updateAddressSchema,
@@ -141,13 +147,73 @@ async function registerCustomerDeviceTokenHandler(
   }
 }
 
+async function listFavoriteShopsHandler(
+  request: Request,
+  response: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const result = await listFavoriteShops(request.auth!.userId)
+
+    response.status(200).json(result)
+  } catch (error) {
+    next(error)
+  }
+}
+
+async function listFavoriteShopIdsHandler(
+  request: Request,
+  response: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const result = await listFavoriteShopIds(request.auth!.userId)
+
+    response.status(200).json(result)
+  } catch (error) {
+    next(error)
+  }
+}
+
+async function addFavoriteShopHandler(
+  request: Request,
+  response: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const result = await addFavoriteShop(request.auth!.userId, request.params.shopId as string)
+
+    response.status(201).json(result)
+  } catch (error) {
+    next(error)
+  }
+}
+
+async function removeFavoriteShopHandler(
+  request: Request,
+  response: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const result = await removeFavoriteShop(request.auth!.userId, request.params.shopId as string)
+
+    response.status(200).json(result)
+  } catch (error) {
+    next(error)
+  }
+}
+
 export {
+  addFavoriteShopHandler,
   createCustomerAddressHandler,
   deleteCustomerAddressHandler,
   getCustomerProfileHandler,
   listCustomerAddressesHandler,
   listCustomerOrdersHandler,
+  listFavoriteShopIdsHandler,
+  listFavoriteShopsHandler,
   registerCustomerDeviceTokenHandler,
+  removeFavoriteShopHandler,
   updateCustomerAddressHandler,
   updateCustomerProfileHandler,
 }

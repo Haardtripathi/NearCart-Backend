@@ -808,6 +808,7 @@ async function listInventoryMappingOptions(search?: string | null) {
 }
 
 export {
+  attachLiveEta,
   getAuthoritativeCheckoutSnapshot,
   getMappedPublicShop,
   getPublicCatalogProduct,
@@ -817,6 +818,7 @@ export {
   listPublicShopCategories,
   listPublicShops,
   listTrendingProducts,
+  mapPublicShopSummary,
   searchPublicCatalog,
   validatePublicCart,
 }

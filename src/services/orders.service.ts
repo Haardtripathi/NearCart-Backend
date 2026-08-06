@@ -3,6 +3,9 @@ import type { OrderStatus, Prisma, Shop, UserRole } from '@prisma/client'
 import env from '../config/env'
 import prisma from '../lib/prisma'
 import { writeAuditLog } from './audit.service'
+import { resolveCouponForCheckout, recordCouponRedemption } from './coupon.service'
+import { getDeliveryEtaMinutes } from './delivery-eta.service'
+import { awardLoyaltyPointsForOrder } from './loyalty.service'
 import { getAuthoritativeCheckoutSnapshot } from './public-storefront.service'
 import { sendPushToCustomer } from './push-notification.service'
 import {
@@ -255,10 +258,30 @@ async function createOrder(
 
   assertWithinServiceArea(shop, effectiveLatitude, effectiveLongitude)
 
+  const normalizedCouponCode = normalizeOptionalString(payload.couponCode)
+
   const createdOrder = await prisma.$transaction(async (transaction) => {
     const orderNumber = await createOrderNumber(transaction, placedAt)
 
-    return transaction.order.create({
+    // Coupon resolution happens inside this same transaction, before the order row exists —
+    // `resolveCouponForCheckout` only validates + computes the discount (it can't create the
+    // `CouponRedemption` yet, since that has a required unique `orderId` FK). See
+    // `recordCouponRedemption` below, called once the order row is created.
+    let discountAmount = 0
+    let resolvedCoupon: Awaited<ReturnType<typeof resolveCouponForCheckout>>['coupon'] | null = null
+
+    if (normalizedCouponCode) {
+      const resolution = await resolveCouponForCheckout(transaction, {
+        userId: options.customerUserId,
+        code: normalizedCouponCode,
+        subtotal: checkoutSnapshot.summary.subtotal,
+        preDiscountTotal: checkoutSnapshot.summary.totalAmount,
+      })
+      discountAmount = resolution.discountAmount
+      resolvedCoupon = resolution.coupon
+    }
+
+    const order = await transaction.order.create({
       data: {
         orderNumber,
         customerUserId: options.customerUserId,
@@ -291,7 +314,9 @@ async function createOrder(
         weatherSurchargeFee: checkoutSnapshot.summary.weatherSurchargeFee,
         weatherCondition: checkoutSnapshot.summary.weatherCondition,
         platformFee: 0,
-        totalAmount: checkoutSnapshot.summary.totalAmount,
+        couponCode: resolvedCoupon?.code ?? null,
+        discountAmount,
+        totalAmount: checkoutSnapshot.summary.totalAmount - discountAmount,
         createdAt: placedAt,
         placedAt,
         items: {
@@ -315,6 +340,17 @@ async function createOrder(
         items: true,
       },
     })
+
+    if (resolvedCoupon) {
+      await recordCouponRedemption(transaction, {
+        couponId: resolvedCoupon.id,
+        userId: options.customerUserId,
+        orderId: order.id,
+        discountAmount,
+      })
+    }
+
+    return order
   })
 
   await writeAuditLog({
@@ -477,11 +513,17 @@ async function refreshOrderStatusFromInventory(
       updateData.paymentStatus = 'PAID'
     }
 
-    return await prisma.order.update({
+    const updatedOrder = await prisma.order.update({
       where: { id: order.id },
       data: updateData,
       include: { items: true, shop: true, review: true },
     })
+
+    if (mappedStatus === 'DELIVERED') {
+      await awardLoyaltyPointsForOrder(updatedOrder)
+    }
+
+    return updatedOrder
   } catch (error) {
     console.warn(
       `[NearKart] Failed to refresh order ${order.orderNumber} status from the inventory bridge:`,
@@ -516,6 +558,63 @@ function assertOrderAccessible(
   }
 }
 
+const ACTIVE_TRACKING_STATUSES = new Set<OrderStatus>([
+  'ACCEPTED',
+  'PREPARING',
+  'READY_FOR_PICKUP',
+  'OUT_FOR_DELIVERY',
+])
+
+/**
+ * Adds a `tracking` block to a single order's detail response — the shop's own coordinates
+ * (never exposed by `mapOrder` itself, which only carries the *delivery* lat/lng) plus a live
+ * ETA figure, so the mobile order-tracking screen has everything it needs for a map + countdown
+ * in one call instead of stitching together a separate shop lookup.
+ *
+ * There is no live driver GPS signal available to this backend (NearCart-Inventory tracks
+ * `Driver.lastKnownLatitude/longitude` but does not expose it over the marketplace bridge — see
+ * `driverName`/etc. on `Order` for what *is* available) — `tracking.shop` +
+ * `tracking.deliveryEtaMinutes` is what the frontend uses to render an estimated, interpolated
+ * position instead of a real one. Only computed for orders in an active, trackable state
+ * (accepted through out-for-delivery); pending/terminal orders get `tracking: null` since there's
+ * nothing useful to show on a map yet (shop hasn't confirmed) or ever again (delivered/cancelled/
+ * rejected).
+ */
+async function buildOrderTracking(order: OrderWithRelations) {
+  if (!ACTIVE_TRACKING_STATUSES.has(order.status) || !order.shop) {
+    return null
+  }
+
+  const { shop } = order
+
+  let etaMinutes: number | null = null
+  try {
+    const eta = await getDeliveryEtaMinutes({
+      shop,
+      customerLatitude: order.latitude,
+      customerLongitude: order.longitude,
+      mode: 'full',
+    })
+    etaMinutes = eta.etaMinutes
+  } catch (error) {
+    console.warn(
+      `[NearKart] Failed to compute live ETA for order ${order.orderNumber} tracking view:`,
+      error instanceof Error ? error.message : error,
+    )
+  }
+
+  return {
+    shop: {
+      id: shop.id,
+      name: shop.name,
+      phone: shop.phone,
+      latitude: shop.latitude,
+      longitude: shop.longitude,
+    },
+    deliveryEtaMinutes: etaMinutes,
+  }
+}
+
 async function getOrderById(orderId: string, accessContext: OrderAccessContext) {
   const order = await prisma.order.findUnique({
     where: { id: orderId },
@@ -533,8 +632,9 @@ async function getOrderById(orderId: string, accessContext: OrderAccessContext) 
   assertOrderAccessible(order, accessContext)
 
   const refreshedOrder = await refreshOrderStatusFromInventory(order)
+  const tracking = await buildOrderTracking(refreshedOrder)
 
-  return mapOrder(refreshedOrder)
+  return { ...mapOrder(refreshedOrder), tracking }
 }
 
 /**
@@ -659,6 +759,7 @@ interface InventoryOrderEventInput {
     | 'REJECTED'
     | 'READY'
     | 'DRIVER_ASSIGNED'
+    | 'DRIVER_UNASSIGNED'
     | 'OUT_FOR_DELIVERY'
     | 'DELIVERED'
     | 'AUTO_CANCELLED'
@@ -676,6 +777,10 @@ const ORDER_EVENT_NOTIFICATION_COPY: Record<
   DRIVER_ASSIGNED: {
     title: 'Delivery partner assigned',
     body: 'A delivery partner has been assigned to your order.',
+  },
+  DRIVER_UNASSIGNED: {
+    title: 'Finding a new delivery partner',
+    body: 'Your previous delivery partner is no longer available — we are finding a new one for your order.',
   },
   OUT_FOR_DELIVERY: {
     title: 'Out for delivery',
@@ -743,7 +848,52 @@ async function applyInventoryOrderEvent(input: InventoryOrderEventInput): Promis
       updateData.paymentStatus = 'PAID'
     }
 
+    // Persist the assigned driver's identity/contact fields the first time this webhook fires
+    // for this order — previously `input.assignedDriver` was only read to build the push
+    // notification body below and then discarded, so an order-detail fetch could never show who
+    // was delivering it. Written once (not re-written on later events for the same order) since
+    // a driver reassignment mid-delivery isn't a case this webhook's `eventType` enum models.
+    if (input.eventType === 'DRIVER_ASSIGNED' && input.assignedDriver) {
+      updateData.driverName = input.assignedDriver.fullName
+      updateData.driverPhone = input.assignedDriver.phone
+      updateData.driverVehicleType = input.assignedDriver.vehicleType
+      updateData.driverAssignedAt = new Date()
+    }
+
     await prisma.order.update({ where: { id: order.id }, data: updateData })
+
+    if (mappedStatus === 'DELIVERED') {
+      await awardLoyaltyPointsForOrder(order)
+    }
+  } else if (input.eventType === 'DRIVER_ASSIGNED' && input.assignedDriver) {
+    // DRIVER_ASSIGNED doesn't map to a NearCart OrderStatus change on its own (mappedStatus is
+    // null for it — see `mapInventorySalesOrderStatus`), so the branch above never runs for this
+    // event type. Still needs its own write so the driver fields land at all.
+    await prisma.order.update({
+      where: { id: order.id },
+      data: {
+        driverName: input.assignedDriver.fullName,
+        driverPhone: input.assignedDriver.phone,
+        driverVehicleType: input.assignedDriver.vehicleType,
+        driverAssignedAt: new Date(),
+      },
+    })
+  } else if (input.eventType === 'DRIVER_UNASSIGNED') {
+    // Fired when a driver declines an order and no replacement is immediately found (see
+    // NearCart-Inventory's declineDriverOrder). Before this branch existed, nothing ever told
+    // NearCart about an unassignment — a customer would keep seeing the declining driver's stale
+    // name/phone on their order (a real "who's bringing my order" trust problem) until either a
+    // new driver happened to get assigned later or the order reached a terminal state. Clearing
+    // these here is the honest state: no driver is currently assigned.
+    await prisma.order.update({
+      where: { id: order.id },
+      data: {
+        driverName: null,
+        driverPhone: null,
+        driverVehicleType: null,
+        driverAssignedAt: null,
+      },
+    })
   }
 
   // `customerUserId` is nullable (SetNull if the owning User is ever deleted) — there's no

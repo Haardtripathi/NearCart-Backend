@@ -26,6 +26,10 @@ const checkoutPayloadSchema = z.object({
   longitude: z.number().min(-180).max(180).optional().nullable(),
   notes: z.string().trim().optional().default(''),
   paymentMethod: z.enum(['COD', 'ONLINE', 'PAY_ON_PICKUP']),
+  // Round-2 promo/coupon feature — optional. Resolved and re-validated server-side against the
+  // authoritative checkout subtotal inside orders.service.ts's createOrder(); never trusted for
+  // the discount amount itself, only the code string.
+  couponCode: z.string().trim().optional().or(z.literal('')),
   items: z
     .array(
       cartValidationItemSchema.pick({
