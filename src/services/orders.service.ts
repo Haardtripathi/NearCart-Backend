@@ -464,6 +464,19 @@ async function refreshOrderStatusFromInventory(
         : new Date()
     }
 
+    // Cash/pay-on-pickup orders are settled the moment the driver hands over the goods — there's
+    // no separate "mark paid" step anywhere in this codebase (confirmed by grep: nothing else
+    // ever writes PaymentStatus.PAID), so without this every COD order stays PENDING forever, even
+    // after delivery. ONLINE is deliberately left untouched: there's no payment-gateway
+    // integration here to confirm money actually moved, so PENDING is the honest state for it.
+    if (
+      mappedStatus === 'DELIVERED' &&
+      order.paymentStatus === 'PENDING' &&
+      (order.paymentMethod === 'COD' || order.paymentMethod === 'PAY_ON_PICKUP')
+    ) {
+      updateData.paymentStatus = 'PAID'
+    }
+
     return await prisma.order.update({
       where: { id: order.id },
       data: updateData,
@@ -559,9 +572,20 @@ async function cancelOrder(orderId: string, accessContext: OrderAccessContext) {
   assertOrderAccessible(order, accessContext)
 
   if (order.status !== 'PENDING_CONFIRMATION') {
+    // The old message hardcoded "it has already been accepted by the shop" for every non-
+    // cancellable status, including CANCELLED/REJECTED/DELIVERED — actively misleading for e.g. a
+    // customer double-tapping cancel on an order that was already cancelled or rejected.
+    const reason: Record<string, string> = {
+      CANCELLED: 'it has already been cancelled.',
+      REJECTED: 'the shop has already rejected it.',
+      DELIVERED: 'it has already been delivered.',
+    }
+
     throw createHttpError(
       409,
-      'Order can no longer be cancelled — it has already been accepted by the shop.',
+      `Order can no longer be cancelled — ${
+        reason[order.status] ?? 'it has already been accepted by the shop.'
+      }`,
     )
   }
 
@@ -707,6 +731,16 @@ async function applyInventoryOrderEvent(input: InventoryOrderEventInput): Promis
 
     if (mappedStatus === 'DELIVERED' && !order.deliveredAt) {
       updateData.deliveredAt = new Date()
+    }
+
+    // See the matching comment in refreshOrderStatusFromInventory — COD/PAY_ON_PICKUP orders are
+    // settled at handover and nothing else in this codebase ever writes PaymentStatus.PAID.
+    if (
+      mappedStatus === 'DELIVERED' &&
+      order.paymentStatus === 'PENDING' &&
+      (order.paymentMethod === 'COD' || order.paymentMethod === 'PAY_ON_PICKUP')
+    ) {
+      updateData.paymentStatus = 'PAID'
     }
 
     await prisma.order.update({ where: { id: order.id }, data: updateData })
