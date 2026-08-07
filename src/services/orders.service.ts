@@ -1,4 +1,5 @@
-import type { OrderStatus, Prisma, Shop, UserRole } from '@prisma/client'
+import { Prisma } from '@prisma/client'
+import type { OrderStatus, Shop, UserRole } from '@prisma/client'
 
 import env from '../config/env'
 import prisma from '../lib/prisma'
@@ -219,6 +220,69 @@ function assertShopIsOpenToday(
   })
 }
 
+const MAX_ORDER_NUMBER_ATTEMPTS = 5
+
+/**
+ * `createOrderNumber` picks the next order number by counting today's existing orders, then
+ * this same transaction inserts a row using that number — a classic count-then-insert race.
+ * `Order.orderNumber` is `@unique` in the schema, so two checkouts landing in the same window
+ * (ordinary concurrent traffic, not a rare corner case) can both count N existing orders, both
+ * compute "...-000{N+1}", and one of the two transactions fails with a unique-constraint
+ * violation that — left unhandled — surfaces as an opaque 500 to a customer whose order was
+ * otherwise perfectly valid. Detects exactly that conflict (and only that one, not any other
+ * unique-constraint failure the transaction might legitimately raise, e.g. a coupon race) so it
+ * can be retried.
+ */
+function isOrderNumberConflict(error: unknown): boolean {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') {
+    return false
+  }
+
+  // Prisma's P2002 `meta` shape is adapter-dependent, confirmed by triggering a real duplicate
+  // insert against this app's actual `@prisma/adapter-libsql` setup while verifying this fix:
+  // the field list is NOT under `meta.target` here (that's the vanilla-driver shape) — it's
+  // nested under `meta.driverAdapterError.cause.constraint.fields`. Checking `target` alone would
+  // silently never match on this adapter and this whole retry-on-conflict fix would be a no-op.
+  // Both shapes are checked so this keeps working if the adapter/driver ever changes.
+  const meta = error.meta as
+    | { target?: unknown; driverAdapterError?: { cause?: { constraint?: { fields?: unknown } } } }
+    | undefined
+
+  const targetFields = Array.isArray(meta?.target) ? (meta?.target as unknown[]) : []
+  const driverAdapterFields = Array.isArray(meta?.driverAdapterError?.cause?.constraint?.fields)
+    ? (meta?.driverAdapterError?.cause?.constraint?.fields as unknown[])
+    : []
+
+  return [...targetFields, ...driverAdapterFields].includes('orderNumber')
+}
+
+/**
+ * Runs `createOrder`'s transaction, retrying from scratch (fresh order-number count included)
+ * whenever it fails solely because of the order-number race described above. Safe to retry
+ * blindly on that one conflict — nothing inside the transaction is committed until it succeeds,
+ * so every side effect (coupon resolution, item rows) is cleanly redone. Any other error
+ * (validation failure, coupon conflict, genuine DB problem) is rethrown immediately without
+ * retrying.
+ */
+async function createOrderTransactionWithRetry(
+  run: (transaction: Prisma.TransactionClient) => Promise<OrderWithItems>,
+): Promise<OrderWithItems> {
+  for (let attempt = 1; attempt <= MAX_ORDER_NUMBER_ATTEMPTS; attempt += 1) {
+    try {
+      return await prisma.$transaction(run)
+    } catch (error) {
+      if (isOrderNumberConflict(error) && attempt < MAX_ORDER_NUMBER_ATTEMPTS) {
+        continue
+      }
+
+      throw error
+    }
+  }
+
+  // Unreachable: the loop above always either returns or throws.
+  throw new Error('Failed to create order after exhausting order-number retry attempts')
+}
+
 async function createOrder(
   payload: CheckoutPayloadInput,
   options: CreateOrderOptions,
@@ -260,7 +324,7 @@ async function createOrder(
 
   const normalizedCouponCode = normalizeOptionalString(payload.couponCode)
 
-  const createdOrder = await prisma.$transaction(async (transaction) => {
+  const createdOrder = await createOrderTransactionWithRetry(async (transaction) => {
     const orderNumber = await createOrderNumber(transaction, placedAt)
 
     // Coupon resolution happens inside this same transaction, before the order row exists —
@@ -347,6 +411,7 @@ async function createOrder(
         userId: options.customerUserId,
         orderId: order.id,
         discountAmount,
+        usageLimit: resolvedCoupon.usageLimit,
       })
     }
 
@@ -460,6 +525,62 @@ const TERMINAL_ORDER_STATUSES = new Set<OrderStatus>([
 ])
 
 /**
+ * Ordinal position of each non-terminal status in the happy-path lifecycle. Used by
+ * `isForwardOrderStatusTransition` to make status writes monotonic — see that function for why.
+ * Terminal statuses (DELIVERED/REJECTED/CANCELLED) are deliberately absent: they're always a
+ * legitimate destination regardless of rank (see below), and both callers already refuse to
+ * touch an order whose *current* status is terminal (`TERMINAL_ORDER_STATUSES` checks at the top
+ * of each function), so this map is never consulted to decide whether to *leave* one.
+ */
+const ORDER_STATUS_RANK: Partial<Record<OrderStatus, number>> = {
+  PENDING_CONFIRMATION: 0,
+  ACCEPTED: 1,
+  PREPARING: 2,
+  READY_FOR_PICKUP: 3,
+  OUT_FOR_DELIVERY: 4,
+}
+
+/**
+ * Bridged orders are advanced from two independent, racing sources: a GET-time poll
+ * (`refreshOrderStatusFromInventory`) and a push webhook (`applyInventoryOrderEvent`), both
+ * reading/reacting to the same underlying Inventory-side SalesOrder. When they disagree — a
+ * stale poll read landing after a faster webhook already advanced the order, a retried webhook,
+ * replication lag — the loser must not be allowed to regress `status` backwards, because status
+ * writes also set stage-specific timestamp fields (`acceptedAt`/`deliveredAt`) that are never
+ * cleared on a later write. Applying a stale "PENDING" read after a genuine "CONFIRMED" webhook
+ * had already landed used to revert `status` to PENDING_CONFIRMATION while leaving `acceptedAt`
+ * populated — an inconsistent `{status:"PENDING_CONFIRMATION", acceptedAt:"<timestamp>"}` row.
+ *
+ * Fix: only forward movement (or a move into a terminal state, which always wins) is ever
+ * applied; a disagreeing read that would move status backwards is treated as stale and dropped.
+ * This is also the right behavior independent of the timestamp issue — the Inventory-side
+ * SalesOrder is the source of truth and its status only moves forward too, so a "backwards" read
+ * here is by construction a stale one, not a legitimate un-confirm.
+ */
+function isForwardOrderStatusTransition(current: OrderStatus, next: OrderStatus): boolean {
+  if (current === next) {
+    return false
+  }
+
+  if (!(next in ORDER_STATUS_RANK)) {
+    // `next` is terminal (DELIVERED/REJECTED/CANCELLED) — always a legitimate destination.
+    return true
+  }
+
+  const currentRank = ORDER_STATUS_RANK[current]
+  const nextRank = ORDER_STATUS_RANK[next]
+
+  if (currentRank === undefined || nextRank === undefined) {
+    // `current` is terminal, which can't happen here (both callers bail out before reaching this
+    // check whenever `current` is terminal) — fall back to "not forward" rather than throwing if
+    // that invariant is ever violated elsewhere.
+    return false
+  }
+
+  return nextRank > currentRank
+}
+
+/**
  * Called on `GET /orders/:orderId` — if this order was bridged into
  * NearCart-Inventory, polls its current SalesOrder status and applies any
  * change locally (see `mapInventorySalesOrderStatus` for the mapping).
@@ -477,7 +598,7 @@ async function refreshOrderStatusFromInventory(
     const bridgeStatus = await getInventorySalesOrderStatus(order.id)
     const mappedStatus = mapInventorySalesOrderStatus(bridgeStatus.status)
 
-    if (!mappedStatus || mappedStatus === order.status) {
+    if (!mappedStatus || !isForwardOrderStatusTransition(order.status, mappedStatus)) {
       return order
     }
 
@@ -822,7 +943,7 @@ async function applyInventoryOrderEvent(input: InventoryOrderEventInput): Promis
 
   const mappedStatus = mapInventorySalesOrderStatus(input.status)
 
-  if (mappedStatus && mappedStatus !== order.status) {
+  if (mappedStatus && isForwardOrderStatusTransition(order.status, mappedStatus)) {
     const updateData: Prisma.OrderUpdateInput = {
       status: mappedStatus,
       inventorySyncStatus: 'SYNCED',

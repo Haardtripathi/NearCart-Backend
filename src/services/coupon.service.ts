@@ -174,10 +174,26 @@ async function resolveCouponForCheckout(
  * and the order creation itself. Bumps `Coupon.timesRedeemed` here (not in
  * `resolveCouponForCheckout`) so an order-creation failure after resolution but before this call
  * can't leave a coupon's usage count incremented for an order that never actually landed.
+ *
+ * The bump is a conditional `updateMany` (re-checking `timesRedeemed < usageLimit`), not a bare
+ * `update`/increment — `resolveCouponForCheckout`'s own usageLimit check ran earlier in this
+ * same transaction against a snapshot that can be stale by the time this call commits if two
+ * checkouts for the same near-exhausted coupon race each other: both could pass that earlier
+ * check and an unconditional increment here would let `timesRedeemed` exceed `usageLimit`.
+ * Re-evaluating the limit atomically as part of this write means only one of two racing "last
+ * redemption" checkouts can match zero rows; that one gets a clear conflict and its whole order
+ * transaction (including this redemption) rolls back — the other's coupon usage is honored
+ * correctly instead of both silently going through.
  */
 async function recordCouponRedemption(
   transaction: Prisma.TransactionClient,
-  input: { couponId: string; userId: string; orderId: string; discountAmount: number },
+  input: {
+    couponId: string
+    userId: string
+    orderId: string
+    discountAmount: number
+    usageLimit: number | null
+  },
 ): Promise<void> {
   await transaction.couponRedemption.create({
     data: {
@@ -188,10 +204,21 @@ async function recordCouponRedemption(
     },
   })
 
-  await transaction.coupon.update({
-    where: { id: input.couponId },
+  const result = await transaction.coupon.updateMany({
+    where:
+      input.usageLimit == null
+        ? { id: input.couponId }
+        : { id: input.couponId, timesRedeemed: { lt: input.usageLimit } },
     data: { timesRedeemed: { increment: 1 } },
   })
+
+  if (result.count === 0) {
+    throw createHttpError(
+      409,
+      'This coupon was just fully redeemed by someone else — please remove it and try again.',
+      { code: 'COUPON_RACE_CONFLICT' },
+    )
+  }
 }
 
 export { previewCoupon, recordCouponRedemption, resolveCouponForCheckout }
