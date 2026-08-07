@@ -1,3 +1,8 @@
+import type { Shop } from '@prisma/client'
+
+import env from '../config/env'
+import { createHttpError } from './httpError'
+
 const EARTH_RADIUS_KM = 6371
 
 function toRadians(degrees: number): number {
@@ -28,4 +33,59 @@ function haversineDistanceKm(
   return EARTH_RADIUS_KM * c
 }
 
-export { haversineDistanceKm }
+/**
+ * Service-area gating: rejects checkout (or, since the cart/validate-vs-checkout mismatch fix,
+ * cart validation) when the delivery location is farther from the shop than its configured
+ * service radius.
+ *
+ * Lives here (not in `orders.service.ts`, where it originated) so both `orders.service.ts`
+ * (`createOrder`) and `public-storefront.service.ts` (`validatePublicCart`) can share one
+ * implementation without a circular import between those two service modules.
+ *
+ * Decisions on missing data (documented for the task write-up):
+ *  - Shop has no latitude/longitude set: the check is skipped entirely —
+ *    there is nothing to measure against, and blocking every order for
+ *    shops that haven't set coordinates yet would be worse than a no-op.
+ *  - Shop has coordinates but `serviceRadiusKm` is null: falls back to
+ *    `DEFAULT_SERVICE_RADIUS_KM` (env, default 10km) rather than skipping —
+ *    a shop with known coordinates should still get *some* hyperlocal
+ *    bound, not an unlimited one, even before they've explicitly set a
+ *    radius.
+ *  - Customer location unknown (no saved address coordinates and no ad-hoc
+ *    lat/lng in the payload): the check is skipped — we have no coordinate
+ *    to compare against.
+ */
+function assertWithinServiceArea(
+  shop: Pick<Shop, 'name' | 'latitude' | 'longitude' | 'serviceRadiusKm'>,
+  customerLatitude: number | null,
+  customerLongitude: number | null,
+): void {
+  if (shop.latitude == null || shop.longitude == null) {
+    return
+  }
+
+  if (customerLatitude == null || customerLongitude == null) {
+    return
+  }
+
+  const allowedRadiusKm = shop.serviceRadiusKm ?? env.defaultServiceRadiusKm
+  const distanceKm = haversineDistanceKm(
+    shop.latitude,
+    shop.longitude,
+    customerLatitude,
+    customerLongitude,
+  )
+
+  if (distanceKm > allowedRadiusKm) {
+    throw createHttpError(
+      400,
+      `${shop.name} only delivers within ${allowedRadiusKm}km, and this address is about ${distanceKm.toFixed(1)}km away.`,
+      {
+        distanceKm: Number(distanceKm.toFixed(2)),
+        allowedRadiusKm,
+      },
+    )
+  }
+}
+
+export { assertWithinServiceArea, haversineDistanceKm }

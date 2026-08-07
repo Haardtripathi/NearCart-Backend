@@ -66,6 +66,18 @@ const publicCartValidationSchema = z.object({
     .array(cartValidationItemSchema)
     .min(1, 'At least one cart item is required'),
   lang: optionalTrimmedString,
+  // Optional ad-hoc customer coordinates. Added so `/public/cart/validate` can enforce the same
+  // service-radius check `POST /orders` already enforces at checkout (previously this endpoint
+  // had no way to receive customer coordinates at all, so a cart 440km from the shop would
+  // validate as fully purchasable and only get rejected at the final checkout call — see
+  // `validatePublicCart` in `public-storefront.service.ts`). Deliberately optional, not
+  // required: the frontend may call this endpoint before a delivery address is chosen (e.g.
+  // while still browsing a cart), and making it required would break any existing caller that
+  // doesn't send it yet. When omitted, the radius check is silently skipped here (same
+  // fail-open-on-missing-data posture `assertWithinServiceArea` already uses for checkout) —
+  // only the shop-open check (which needs no customer location) is unconditionally enforced.
+  latitude: z.number().min(-90).max(90).optional().nullable(),
+  longitude: z.number().min(-180).max(180).optional().nullable(),
 })
 
 type ShopCatalogQueryInput = z.infer<typeof shopCatalogQuerySchema>

@@ -14,8 +14,8 @@ import {
 } from './inventory-client.service'
 import { getWeatherFeeForCondition, getWeatherImpact } from './weather.service'
 import { createHttpError } from '../utils/httpError'
-import { haversineDistanceKm } from '../utils/geo'
-import { getShopTodayStatus } from '../utils/shop-availability'
+import { assertWithinServiceArea, haversineDistanceKm } from '../utils/geo'
+import { assertShopIsOpenToday, getShopTodayStatus } from '../utils/shop-availability'
 import type {
   CartValidationItemInput,
   PublicCartValidationInput,
@@ -141,6 +141,20 @@ async function getMappedPublicShop(shopIdOrSlug: string) {
 }
 
 function mapPublicShopSummary(shop: Shop) {
+  const todayStatus = getShopTodayStatus(shop)
+  // `isShopOpenNow` is a static opening/closing-time window check (Asia/Kolkata); `todayStatus`
+  // is the shop owner's explicit daily confirmation. They're computed from different data and
+  // used to independently disagree (e.g. `isOpenNow: true` alongside `todayStatus: "CLOSED"`
+  // when the owner marks the shop closed today despite it being within normal hours) — a
+  // response that's self-contradictory to any consumer reading only `isOpenNow`, the
+  // more-naturally-named-but-less-authoritative of the two fields. `todayStatus` is the field
+  // checkout actually enforces (`assertShopIsOpenToday`), so it wins: `isOpenNow` can never be
+  // `true` when `todayStatus` is `CLOSED`. When the owner hasn't confirmed today at all
+  // (`PENDING_CONFIRMATION`) or has confirmed `OPEN`, `isOpenNow` still reflects the raw
+  // opening/closing-time window (unchanged from before) — the reconciliation only forces the
+  // one direction that was actively misleading.
+  const isOpenNow = todayStatus === 'CLOSED' ? false : isShopOpenNow(shop)
+
   return {
     id: shop.id,
     name: shop.name,
@@ -154,8 +168,8 @@ function mapPublicShopSummary(shop: Shop) {
     minimumOrderAmount: shop.minimumOrderAmount,
     deliveryFee: shop.deliveryFeeDefault,
     deliveryEnabled: shop.deliveryEnabled,
-    isOpenNow: isShopOpenNow(shop),
-    todayStatus: getShopTodayStatus(shop),
+    isOpenNow,
+    todayStatus,
     todayStatusReason: shop.todayStatusReason,
   }
 }
@@ -752,7 +766,31 @@ async function getPublicCatalogProduct(
   }
 }
 
+// Fix for the cart/validate-vs-checkout mismatch: `POST /orders` (checkout, in
+// `orders.service.ts::createOrder`) enforces both `assertShopIsOpenToday` and
+// `assertWithinServiceArea` before creating an order, but this endpoint previously enforced
+// neither — a customer could review a fully priced, seemingly-valid cart for a shop that was
+// closed, or 440km away, and only discover that at the final checkout call. Both asserts are
+// deliberately run here, in `validatePublicCart`, rather than inside the shared
+// `buildValidatedCartSnapshot` — that function also backs `getAuthoritativeCheckoutSnapshot`
+// (the checkout path), which already runs its own equivalent checks in `createOrder` using
+// address-resolution logic (saved address lookup, ad-hoc payload fallback) that lives in
+// `orders.service.ts` and isn't available at this layer. Keeping the checks here, scoped to
+// only this endpoint, fixes the validate-time gap without touching checkout's existing
+// (already-correct, per E2E scenario B3/B4) behavior or error precedence.
+//
+// `assertShopIsOpenToday` is unconditional — it needs no customer location, so there's no
+// reason to ever skip it here. `assertWithinServiceArea` only runs the actual distance
+// comparison when both `payload.latitude`/`payload.longitude` are present (it already no-ops
+// internally on missing shop or customer coordinates) — so a frontend that hasn't started
+// sending coordinates at validate-time yet still gets the shop-open check, just not the radius
+// check, until it's updated to send them.
 async function validatePublicCart(payload: PublicCartValidationInput) {
+  const shop = await getMappedPublicShop(payload.shopId)
+
+  assertShopIsOpenToday(shop)
+  assertWithinServiceArea(shop, payload.latitude ?? null, payload.longitude ?? null)
+
   const snapshot = await buildValidatedCartSnapshot(payload)
 
   return {

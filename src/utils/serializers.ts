@@ -229,6 +229,7 @@ function mapOrder(order: OrderSource) {
     placedAt: order.placedAt,
     acceptedAt: order.acceptedAt,
     deliveredAt: order.deliveredAt,
+    deliveryProofPhotoUrl: order.deliveryProofPhotoUrl ?? null,
     driverName: order.driverName ?? null,
     driverPhone: order.driverPhone ?? null,
     driverVehicleType: order.driverVehicleType ?? null,

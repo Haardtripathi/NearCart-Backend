@@ -266,6 +266,13 @@ model Order {
   placedAt             DateTime      @default(now())
   acceptedAt           DateTime?
   deliveredAt          DateTime?
+  // Delivery-proof photo captured by the driver on the NearCart-Inventory side (Cloudinary URL)
+  // and relayed here via the DELIVERED webhook event / poll-refresh path — see
+  // `applyInventoryOrderEvent` and `refreshOrderStatusFromInventory` in `orders.service.ts`.
+  // Nullable: orders delivered before this field existed, and any DELIVERED event/poll response
+  // that doesn't carry a photo (e.g. the sibling repo hasn't shipped its side yet, or a driver
+  // skipped the photo step), simply leave this null rather than erroring.
+  deliveryProofPhotoUrl String?
   // Round-2 loyalty/rewards feature. Null until this order reaches DELIVERED and
   // `awardLoyaltyPointsForOrder` runs (see loyalty.service.ts) — null is deliberately distinct
   // from 0 (an order that *was* processed but earned zero points, e.g. a very small basket)

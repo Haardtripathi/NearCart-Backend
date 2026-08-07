@@ -25,6 +25,10 @@ const orderEventSchema = z.object({
     })
     .nullable()
     .optional(),
+  // Delivery-proof photo (Cloudinary URL), sent by NearCart-Inventory on a DELIVERED event.
+  // Optional/nullable so payloads from before that sibling repo ships its side of this — or a
+  // DELIVERED event where the driver simply didn't capture a photo — still validate cleanly.
+  deliveryProofPhotoUrl: z.string().trim().min(1).nullable().optional(),
 })
 
 async function receiveInventoryOrderEventHandler(

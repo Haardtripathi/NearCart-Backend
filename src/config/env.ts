@@ -1,3 +1,11 @@
+// Self-import dotenv here, not just in `server.ts` — any ad-hoc script that imports this
+// config module directly (e.g. a one-off Prisma script, not a full `server.ts` boot) must
+// still get `.env` loaded, otherwise it silently falls back to this file's hardcoded defaults
+// (e.g. `file:./prisma/nearkart.db`) instead of the real configured DB. Idempotent/safe to
+// import twice — `dotenv/config` no-ops if env vars are already set (e.g. by `server.ts`
+// importing this module after already importing `dotenv/config` itself).
+import 'dotenv/config'
+
 const parsePort = (value: string | undefined, fallback: number): number => {
   const parsedValue = Number.parseInt(value ?? '', 10)
 

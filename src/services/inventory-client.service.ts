@@ -403,6 +403,10 @@ interface InventorySalesOrderStatusResponse {
   rejectionReason?: string | null
   confirmedAt?: string | null
   deliveredAt?: string | null
+  // Delivery-proof photo (Cloudinary URL). Optional: the sibling NearCart-Inventory repo may not
+  // send this field on every deployment yet (it's being added there separately) — code reading
+  // this response must treat a missing/undefined value the same as "no photo", not an error.
+  deliveryProofPhotoUrl?: string | null
 }
 
 // NOTE ON PATH PREFIX: the bridge contract this was built against

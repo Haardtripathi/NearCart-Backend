@@ -1,7 +1,6 @@
 import { Prisma } from '@prisma/client'
 import type { OrderStatus, Shop, UserRole } from '@prisma/client'
 
-import env from '../config/env'
 import prisma from '../lib/prisma'
 import { writeAuditLog } from './audit.service'
 import { resolveCouponForCheckout, recordCouponRedemption } from './coupon.service'
@@ -15,9 +14,9 @@ import {
   pushSalesOrderToInventory,
 } from './inventory-client.service'
 import { createHttpError } from '../utils/httpError'
-import { haversineDistanceKm } from '../utils/geo'
+import { assertWithinServiceArea } from '../utils/geo'
 import { mapOrder } from '../utils/serializers'
-import { getShopTodayStatus } from '../utils/shop-availability'
+import { assertShopIsOpenToday } from '../utils/shop-availability'
 import { normalizeOptionalString } from '../utils/user'
 import type { CheckoutPayloadInput } from '../validation/orders.validation'
 
@@ -29,58 +28,6 @@ interface OrderAccessContext {
   userId: string
   role: UserRole
   shopOwnerProfileId?: string | null
-}
-
-/**
- * Service-area gating: rejects checkout when the delivery location is
- * farther from the shop than its configured service radius.
- *
- * Decisions on missing data (documented for the task write-up):
- *  - Shop has no latitude/longitude set: the check is skipped entirely —
- *    there is nothing to measure against, and blocking every order for
- *    shops that haven't set coordinates yet would be worse than a no-op.
- *  - Shop has coordinates but `serviceRadiusKm` is null: falls back to
- *    `DEFAULT_SERVICE_RADIUS_KM` (env, default 10km) rather than skipping —
- *    a shop with known coordinates should still get *some* hyperlocal
- *    bound, not an unlimited one, even before they've explicitly set a
- *    radius.
- *  - Customer location unknown (no saved address coordinates and no ad-hoc
- *    lat/lng in the payload): the check is skipped — we have no coordinate
- *    to compare against. This is a known gap until the frontend's Google
- *    Maps address flow (see location.routes.ts) makes lat/lng mandatory on
- *    every address.
- */
-function assertWithinServiceArea(
-  shop: Pick<Shop, 'name' | 'latitude' | 'longitude' | 'serviceRadiusKm'>,
-  customerLatitude: number | null,
-  customerLongitude: number | null,
-): void {
-  if (shop.latitude == null || shop.longitude == null) {
-    return
-  }
-
-  if (customerLatitude == null || customerLongitude == null) {
-    return
-  }
-
-  const allowedRadiusKm = shop.serviceRadiusKm ?? env.defaultServiceRadiusKm
-  const distanceKm = haversineDistanceKm(
-    shop.latitude,
-    shop.longitude,
-    customerLatitude,
-    customerLongitude,
-  )
-
-  if (distanceKm > allowedRadiusKm) {
-    throw createHttpError(
-      400,
-      `${shop.name} only delivers within ${allowedRadiusKm}km, and this address is about ${distanceKm.toFixed(1)}km away.`,
-      {
-        distanceKm: Number(distanceKm.toFixed(2)),
-        allowedRadiusKm,
-      },
-    )
-  }
 }
 
 /**
@@ -194,31 +141,10 @@ async function assertCustomerIsVerified(customerUserId: string): Promise<void> {
   }
 }
 
-/**
- * Blocks checkout unless the shop owner has explicitly confirmed their shop is open TODAY (see
- * `src/utils/shop-availability.ts`). A shop that's never said anything today, or said so on a
- * previous day, reads as "PENDING_CONFIRMATION" — customers must not be able to place orders a
- * shop hasn't actually committed to fulfilling.
- */
-function assertShopIsOpenToday(
-  shop: Pick<Shop, 'name' | 'isOpenToday' | 'todayStatusReason' | 'todayStatusUpdatedAt'>,
-): void {
-  const todayStatus = getShopTodayStatus(shop)
-
-  if (todayStatus === 'OPEN') {
-    return
-  }
-
-  const message =
-    todayStatus === 'PENDING_CONFIRMATION'
-      ? "This shop hasn't confirmed today's availability yet — check back soon."
-      : `This shop is closed today${shop.todayStatusReason ? ` (${shop.todayStatusReason})` : ''}`
-
-  throw createHttpError(403, message, {
-    code: 'SHOP_NOT_OPEN_TODAY',
-    data: { todayStatus, reason: shop.todayStatusReason ?? null },
-  })
-}
+// `assertShopIsOpenToday` moved to `../utils/shop-availability.ts` (imported above) so both
+// this file's `createOrder` and `public-storefront.service.ts`'s `validatePublicCart` can share
+// one implementation without a circular import between the two service modules — see that
+// file's doc comment for the full rationale. Behavior is unchanged, only the location moved.
 
 const MAX_ORDER_NUMBER_ATTEMPTS = 5
 
@@ -621,6 +547,15 @@ async function refreshOrderStatusFromInventory(
         : new Date()
     }
 
+    // Delivery-proof photo, if the bridge response carries one — defensive read, since the
+    // sibling NearCart-Inventory repo's poll-status endpoint may not send this field yet (it's
+    // being added there separately). Only ever set when a value is actually present, so an
+    // older/not-yet-updated bridge response never overwrites an already-stored photo with
+    // nothing.
+    if (bridgeStatus.deliveryProofPhotoUrl) {
+      updateData.deliveryProofPhotoUrl = bridgeStatus.deliveryProofPhotoUrl
+    }
+
     // Cash/pay-on-pickup orders are settled the moment the driver hands over the goods — there's
     // no separate "mark paid" step anywhere in this codebase (confirmed by grep: nothing else
     // ever writes PaymentStatus.PAID), so without this every COD order stays PENDING forever, even
@@ -794,18 +729,28 @@ async function cancelOrder(orderId: string, accessContext: OrderAccessContext) {
 
   if (order.status !== 'PENDING_CONFIRMATION') {
     // The old message hardcoded "it has already been accepted by the shop" for every non-
-    // cancellable status, including CANCELLED/REJECTED/DELIVERED — actively misleading for e.g. a
-    // customer double-tapping cancel on an order that was already cancelled or rejected.
+    // cancellable status, including CANCELLED/REJECTED/DELIVERED/OUT_FOR_DELIVERY — actively
+    // misleading for e.g. a customer double-tapping cancel on an order that was already
+    // cancelled/rejected, or trying to cancel one that's already out for delivery. Every status
+    // in `OrderStatus` that reaches this branch (i.e. anything other than
+    // `PENDING_CONFIRMATION`) is covered explicitly; the fallback still derives a message from
+    // the order's actual current status rather than a fixed phrase, so any future enum value
+    // added here degrades gracefully instead of silently going back to a wrong hardcoded string.
     const reason: Record<string, string> = {
       CANCELLED: 'it has already been cancelled.',
       REJECTED: 'the shop has already rejected it.',
       DELIVERED: 'it has already been delivered.',
+      ACCEPTED: 'it has already been accepted by the shop.',
+      PREPARING: 'the shop has already started preparing it.',
+      READY_FOR_PICKUP: 'it is already ready for pickup.',
+      OUT_FOR_DELIVERY: 'it has already been picked up for delivery.',
     }
 
     throw createHttpError(
       409,
       `Order can no longer be cancelled — ${
-        reason[order.status] ?? 'it has already been accepted by the shop.'
+        reason[order.status] ??
+        `it is already ${order.status.replace(/_/g, ' ').toLowerCase()}.`
       }`,
     )
   }
@@ -886,6 +831,10 @@ interface InventoryOrderEventInput {
     | 'AUTO_CANCELLED'
     | 'CANCELLED'
   assignedDriver?: { fullName: string; phone: string; vehicleType: string } | null
+  // Delivery-proof photo (Cloudinary URL), present on a DELIVERED event once the sibling
+  // NearCart-Inventory repo sends it. Optional — see `orderEventSchema` in
+  // `internal.controller.ts`.
+  deliveryProofPhotoUrl?: string | null
 }
 
 const ORDER_EVENT_NOTIFICATION_COPY: Record<
@@ -957,6 +906,14 @@ async function applyInventoryOrderEvent(input: InventoryOrderEventInput): Promis
 
     if (mappedStatus === 'DELIVERED' && !order.deliveredAt) {
       updateData.deliveredAt = new Date()
+    }
+
+    // Delivery-proof photo, when the DELIVERED event carries one. Optional field — see
+    // `InventoryOrderEventInput` — so an event without it (older sibling-repo deploy, or a
+    // driver who didn't capture a photo) simply leaves this untouched rather than nulling out
+    // anything already stored.
+    if (mappedStatus === 'DELIVERED' && input.deliveryProofPhotoUrl) {
+      updateData.deliveryProofPhotoUrl = input.deliveryProofPhotoUrl
     }
 
     // See the matching comment in refreshOrderStatusFromInventory — COD/PAY_ON_PICKUP orders are
