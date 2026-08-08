@@ -581,11 +581,24 @@ async function fanOutCatalogAcrossShops(
 // Round-robin interleave across shop groups (take item 0 from every shop, then item 1 from
 // every shop, ...) rather than concatenating, so results aren't dominated by whichever shop
 // happens to have the largest catalog.
+//
+// Dedupes on `${item.id}:${item.primaryVariantId}` as it merges. Under normal data this is a
+// no-op — inventory product/variant ids are globally unique cuids, so two genuinely different
+// shops never produce a collision. But nothing in the schema stops two `Shop` rows from being
+// mapped to the same `inventoryOrganizationId`/`inventoryBranchId` (confirmed live in prod:
+// leftover test fixtures "Sweep Test Shop" and "E2E Test Shop 1786026141921" both point at the
+// same branch) — when that happens, the fan-out queries the same underlying catalog twice and
+// this function used to happily merge in the same product/variant under two different `shop`
+// wrappers. That surfaced as a 100%-reproducible React "two children with the same key" console
+// warning on the home page's TrendingRail (`${product.id}:${product.variantId}` as the list
+// key) and duplicate-looking cards in trending/search results. Deduping here fixes it for both
+// callers regardless of the underlying shop-mapping data issue.
 function interleaveShopResults(
   groups: FannedOutShopCatalog[],
   limit: number,
 ): Array<{ shop: Shop; item: InventoryCatalogItem }> {
   const merged: Array<{ shop: Shop; item: InventoryCatalogItem }> = []
+  const seenKeys = new Set<string>()
   let index = 0
   let addedInLastPass = true
 
@@ -600,8 +613,14 @@ function interleaveShopResults(
       const item = group.items[index]
 
       if (item) {
-        merged.push({ shop: group.shop, item })
         addedInLastPass = true
+
+        const key = `${item.id}:${item.primaryVariantId}`
+
+        if (!seenKeys.has(key)) {
+          seenKeys.add(key)
+          merged.push({ shop: group.shop, item })
+        }
       }
     }
 
