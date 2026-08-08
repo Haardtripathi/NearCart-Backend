@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client'
 import type { OrderStatus, Shop, UserRole } from '@prisma/client'
 
 import prisma from '../lib/prisma'
+import { kvDel, kvSetNx } from '../lib/kvStore'
 import { writeAuditLog } from './audit.service'
 import { resolveCouponForCheckout, recordCouponRedemption } from './coupon.service'
 import { getDeliveryEtaMinutes } from './delivery-eta.service'
@@ -74,27 +75,53 @@ function mapInventorySalesOrderStatus(
   }
 }
 
+/**
+ * Critical bug found via live adversarial testing 2026-08-08: this used to compute the next
+ * sequence number as `COUNT(today's orders) + 1`. That's only correct as long as the sequence
+ * has zero gaps — and a gap is exactly what the order-number race below (see
+ * `isOrderNumberConflict`'s doc comment) produces the moment a losing transaction's number gets
+ * "spent" without a row ever landing for it (the losing attempt's computed number was never
+ * inserted, but once ANY other transaction goes on to claim a higher number, the count of rows
+ * permanently undercounts relative to the highest number actually in use). Once that happens,
+ * `COUNT + 1` recomputes the SAME already-taken number on every subsequent attempt forever —
+ * confirmed live: after a handful of concurrent test checkouts produced one such gap, EVERY
+ * following checkout attempt failed with the exact same `UNIQUE constraint failed:
+ * Order.orderNumber` error, including purely sequential, non-concurrent ones, because the count
+ * never moves even though the true highest order number keeps climbing. This wasn't a rare edge
+ * case — it reproduced on the very first bit of concurrent checkout traffic and then wedged
+ * checkout for the rest of the day.
+ *
+ * Fix: derive the next number from `MAX(today's order numbers) + 1` instead of a count. This is
+ * self-healing regardless of how many gaps already exist — it always continues from the true
+ * highest number in use, so a gap can never cause a permanent collision again. (True same-instant
+ * collisions between two transactions computing the same "next" number at once can still happen
+ * — that's what `createOrderTransactionWithRetry`'s retry-with-backoff above is for — but that's
+ * now a genuine one-off race, not a self-reinforcing stuck state.)
+ */
 async function createOrderNumber(
   transaction: Prisma.TransactionClient,
   placedAt: Date,
 ): Promise<string> {
   const datePrefix = placedAt.toISOString().slice(0, 10).replaceAll('-', '')
-  const dayStart = new Date(placedAt)
-  dayStart.setUTCHours(0, 0, 0, 0)
+  const orderNumberPrefix = `NC-${datePrefix}-`
 
-  const dayEnd = new Date(placedAt)
-  dayEnd.setUTCHours(23, 59, 59, 999)
-
-  const existingOrdersCount = await transaction.order.count({
+  const todaysOrders = await transaction.order.findMany({
     where: {
-      createdAt: {
-        gte: dayStart,
-        lte: dayEnd,
+      orderNumber: {
+        startsWith: orderNumberPrefix,
       },
+    },
+    select: {
+      orderNumber: true,
     },
   })
 
-  return `NC-${datePrefix}-${String(existingOrdersCount + 1).padStart(4, '0')}`
+  const highestSequence = todaysOrders.reduce((max, { orderNumber }) => {
+    const suffix = Number.parseInt(orderNumber.slice(orderNumberPrefix.length), 10)
+    return Number.isFinite(suffix) && suffix > max ? suffix : max
+  }, 0)
+
+  return `${orderNumberPrefix}${String(highestSequence + 1).padStart(4, '0')}`
 }
 
 async function resolveCustomerAddress(
@@ -146,7 +173,32 @@ async function assertCustomerIsVerified(customerUserId: string): Promise<void> {
 // one implementation without a circular import between the two service modules — see that
 // file's doc comment for the full rationale. Behavior is unchanged, only the location moved.
 
-const MAX_ORDER_NUMBER_ATTEMPTS = 5
+const MAX_ORDER_NUMBER_ATTEMPTS = 8
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms)
+  })
+}
+
+/**
+ * Bug found via live testing 2026-08-08 alongside the `isOrderNumberConflict` detection gap
+ * above: even once conflicts are correctly detected, firing 4+ genuinely concurrent checkouts
+ * (different customers, same shop, same instant) made EVERY one of them exhaust all retry
+ * attempts and still fail — confirmed by instrumenting the retry loop live. Root cause: retrying
+ * immediately with no delay keeps the competing requests in lockstep. Each round, all of them
+ * recount at roughly the same moment (similar network latency to the DB), so a loser from round 1
+ * doesn't just risk re-colliding with the original winner — it can just as easily re-collide with
+ * one of the OTHER losers, who read the exact same stale count it did. Nothing about immediate
+ * retry breaks that symmetry, so a big enough herd can stay synchronized for every attempt.
+ * Full-jitter backoff (a random delay, capped and growing with attempt number, before recounting)
+ * is the standard fix for exactly this shape of problem — it de-synchronizes the herd so
+ * transactions naturally spread out across the retry window instead of re-bunching every round.
+ */
+function orderNumberRetryBackoffMs(attempt: number): number {
+  const capMs = Math.min(25 * 2 ** (attempt - 1), 400)
+  return Math.floor(Math.random() * capMs)
+}
 
 /**
  * `createOrderNumber` picks the next order number by counting today's existing orders, then
@@ -159,27 +211,77 @@ const MAX_ORDER_NUMBER_ATTEMPTS = 5
  * unique-constraint failure the transaction might legitimately raise, e.g. a coupon race) so it
  * can be retried.
  */
+/**
+ * Bug found via live concurrent-checkout testing 2026-08-08: two customers racing this exact
+ * order-number window produced a raw, unhandled `DriverAdapterError` (from
+ * `@prisma/driver-adapter-utils`, thrown by `@prisma/adapter-libsql`) that surfaced straight to
+ * the client as a 500 with the literal SQLite message ("SQLITE_CONSTRAINT: ... UNIQUE constraint
+ * failed: Order.orderNumber") — for an order that was otherwise perfectly valid, exactly the
+ * failure mode this whole retry mechanism exists to prevent. The `PrismaClientKnownRequestError`
+ * / P2002 shape this function originally only checked for is what a unique-constraint violation
+ * looks like when Prisma's error-translation layer gets to wrap it; empirically (confirmed via
+ * the server log while reproducing this), a violation raised *inside* an interactive
+ * `$transaction()` callback on this Prisma 7 + adapter-libsql combination sometimes bypasses that
+ * translation entirely and comes through as the driver adapter's own untranslated error class
+ * instead. Rather than importing `@prisma/driver-adapter-utils` just for an `instanceof` check
+ * (an indirect dependency, not declared in this app's own package.json), this matches on the
+ * error's own message text — which is present on both shapes and is the one part of this that's
+ * stable across however Prisma chooses to wrap/not-wrap the underlying driver error next.
+ */
+function isOrderNumberUniqueConstraintMessage(message: string): boolean {
+  return /unique constraint failed/i.test(message) && message.includes('orderNumber')
+}
+
 function isOrderNumberConflict(error: unknown): boolean {
-  if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') {
+  if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+    // Prisma's P2002 `meta` shape is adapter-dependent, confirmed by triggering a real duplicate
+    // insert against this app's actual `@prisma/adapter-libsql` setup while verifying this fix:
+    // the field list is NOT under `meta.target` here (that's the vanilla-driver shape) — it's
+    // nested under `meta.driverAdapterError.cause.constraint.fields`. Checking `target` alone
+    // would silently never match on this adapter and this whole retry-on-conflict fix would be a
+    // no-op. Both shapes are checked so this keeps working if the adapter/driver ever changes.
+    const meta = error.meta as
+      | { target?: unknown; driverAdapterError?: { cause?: { constraint?: { fields?: unknown } } } }
+      | undefined
+
+    const targetFields = Array.isArray(meta?.target) ? (meta?.target as unknown[]) : []
+    const driverAdapterFields = Array.isArray(meta?.driverAdapterError?.cause?.constraint?.fields)
+      ? (meta?.driverAdapterError?.cause?.constraint?.fields as unknown[])
+      : []
+
+    if ([...targetFields, ...driverAdapterFields].includes('orderNumber')) {
+      return true
+    }
+
+    if (typeof error.message === 'string' && isOrderNumberUniqueConstraintMessage(error.message)) {
+      return true
+    }
+
     return false
   }
 
-  // Prisma's P2002 `meta` shape is adapter-dependent, confirmed by triggering a real duplicate
-  // insert against this app's actual `@prisma/adapter-libsql` setup while verifying this fix:
-  // the field list is NOT under `meta.target` here (that's the vanilla-driver shape) — it's
-  // nested under `meta.driverAdapterError.cause.constraint.fields`. Checking `target` alone would
-  // silently never match on this adapter and this whole retry-on-conflict fix would be a no-op.
-  // Both shapes are checked so this keeps working if the adapter/driver ever changes.
-  const meta = error.meta as
-    | { target?: unknown; driverAdapterError?: { cause?: { constraint?: { fields?: unknown } } } }
-    | undefined
+  // Fallback for the raw (untranslated) driver-adapter error shape described above — walk the
+  // error's own message and, defensively, one level of `cause` (in case a future Prisma version
+  // wraps it differently again), matching on text rather than a specific error class.
+  if (error instanceof Error) {
+    if (isOrderNumberUniqueConstraintMessage(error.message)) {
+      return true
+    }
 
-  const targetFields = Array.isArray(meta?.target) ? (meta?.target as unknown[]) : []
-  const driverAdapterFields = Array.isArray(meta?.driverAdapterError?.cause?.constraint?.fields)
-    ? (meta?.driverAdapterError?.cause?.constraint?.fields as unknown[])
-    : []
+    const cause = (error as { cause?: unknown }).cause
 
-  return [...targetFields, ...driverAdapterFields].includes('orderNumber')
+    if (
+      cause &&
+      typeof cause === 'object' &&
+      'message' in cause &&
+      typeof (cause as { message: unknown }).message === 'string' &&
+      isOrderNumberUniqueConstraintMessage((cause as { message: string }).message)
+    ) {
+      return true
+    }
+  }
+
+  return false
 }
 
 /**
@@ -198,6 +300,7 @@ async function createOrderTransactionWithRetry(
       return await prisma.$transaction(run)
     } catch (error) {
       if (isOrderNumberConflict(error) && attempt < MAX_ORDER_NUMBER_ATTEMPTS) {
+        await sleep(orderNumberRetryBackoffMs(attempt))
         continue
       }
 
@@ -209,7 +312,57 @@ async function createOrderTransactionWithRetry(
   throw new Error('Failed to create order after exhausting order-number retry attempts')
 }
 
+const CHECKOUT_LOCK_TTL_SECONDS = 15
+
+function checkoutLockKey(customerUserId: string): string {
+  return `checkout-lock:${customerUserId}`
+}
+
+/**
+ * Bug found via live adversarial testing 2026-08-08: firing two `POST /orders` requests back to
+ * back for the same customer (a fast double-tap on "place order" before the frontend's
+ * `isSubmitting` guard disables the button, a flaky client retry, or simply two browser tabs)
+ * created two separate, fully inventory-synced orders — confirmed with real concurrent curl
+ * requests, both returned 201 with distinct order numbers. There was no server-side guard against
+ * this at all; the frontend's disabled-button state is a UX nicety, not the enforcement boundary
+ * (same lesson as `assertCustomerIsVerified`'s doc comment above).
+ *
+ * This is a short-lived mutual-exclusion lock, not a payload-based idempotency key (the client
+ * sends no idempotency key today, and adding one is a bigger frontend+backend change) — while
+ * held, any other checkout attempt from the same customer is rejected outright rather than
+ * silently deduped, so the customer sees a clear "still processing" message instead of a
+ * confusingly-ignored second click. `kvSetNx` (see its doc comment) is what makes this safe under
+ * true concurrency, the same way `recordCouponRedemption`'s conditional `updateMany` is for the
+ * coupon-usage race — a plain get-then-set here would have the identical TOCTOU gap this is meant
+ * to close. TTL is a crash-safety net (in case a request dies between acquiring the lock and the
+ * `finally` release below), not the primary release mechanism.
+ */
 async function createOrder(
+  payload: CheckoutPayloadInput,
+  options: CreateOrderOptions,
+) {
+  const lockAcquired = await kvSetNx(
+    checkoutLockKey(options.customerUserId),
+    '1',
+    CHECKOUT_LOCK_TTL_SECONDS,
+  )
+
+  if (!lockAcquired) {
+    throw createHttpError(
+      409,
+      "Your previous order is still being placed. Please wait a moment — check your orders before trying again.",
+      { code: 'CHECKOUT_IN_PROGRESS' },
+    )
+  }
+
+  try {
+    return await createOrderLocked(payload, options)
+  } finally {
+    await kvDel(checkoutLockKey(options.customerUserId))
+  }
+}
+
+async function createOrderLocked(
   payload: CheckoutPayloadInput,
   options: CreateOrderOptions,
 ) {

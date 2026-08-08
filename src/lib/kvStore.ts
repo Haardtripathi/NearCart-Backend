@@ -45,6 +45,36 @@ async function kvGet(key: string): Promise<string | null> {
   return memoryStore.get(key)?.value ?? null
 }
 
+/**
+ * Atomic "set if not already present" — the primitive a short-lived mutual-exclusion lock needs
+ * (see `orders.service.ts`'s checkout lock, added after live testing showed two concurrent
+ * `POST /orders` calls for the same customer — a fast double-tap on "place order", or any client
+ * that fires the request twice before disabling its button — both succeed and create two real,
+ * inventory-synced orders; there was no server-side guard against that at all). A plain
+ * `kvGet` + `kvSet` pair is NOT atomic (two concurrent callers can both see "no key" before either
+ * writes), which is exactly the same class of race `recordCouponRedemption` in `coupon.service.ts`
+ * had to guard against with a conditional `updateMany` — this is the KV-store equivalent for a
+ * lock rather than a counter. Returns `true` when this call was the one that created the key
+ * (lock acquired), `false` when the key already existed (lock held by someone else).
+ */
+async function kvSetNx(key: string, value: string, ttlSeconds: number): Promise<boolean> {
+  const redis = getRedisClient()
+
+  if (redis) {
+    const result = await redis.set(key, value, 'EX', ttlSeconds, 'NX')
+    return result === 'OK'
+  }
+
+  pruneExpired(key)
+
+  if (memoryStore.has(key)) {
+    return false
+  }
+
+  memoryStore.set(key, { value, expiresAt: Date.now() + ttlSeconds * 1000 })
+  return true
+}
+
 async function kvDel(key: string): Promise<void> {
   const redis = getRedisClient()
 
@@ -99,4 +129,4 @@ async function kvTtlRemaining(key: string): Promise<number> {
   return Math.max(0, Math.ceil((entry.expiresAt - Date.now()) / 1000))
 }
 
-export { kvDel, kvGet, kvIncr, kvSet, kvTtlRemaining }
+export { kvDel, kvGet, kvIncr, kvSet, kvSetNx, kvTtlRemaining }
