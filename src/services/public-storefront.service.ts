@@ -832,6 +832,11 @@ async function getAuthoritativeCheckoutSnapshot(payload: {
     productId: string
     variantId?: string | null
     quantity: number
+    // See `orders.validation.ts`'s doc comment on the same two fields — optional, only used to
+    // detect a price change between whenever the caller last saw this item's price and this
+    // checkout call.
+    expectedPrice?: number
+    expectedMrp?: number | null
   }>
   lang?: string | null
 }) {
@@ -842,6 +847,8 @@ async function getAuthoritativeCheckoutSnapshot(payload: {
       productId: item.productId,
       variantId: item.variantId ?? undefined,
       quantity: item.quantity,
+      expectedPrice: item.expectedPrice,
+      expectedMrp: item.expectedMrp,
     })),
   })
 
@@ -855,6 +862,35 @@ async function getAuthoritativeCheckoutSnapshot(payload: {
         summary: snapshot.summary,
       },
     })
+  }
+
+  // Bug found via live cross-repo testing 2026-08-09: a caller that supplies `expectedPrice`
+  // (the real frontend now does, right before this call — see `CheckoutPage.tsx`'s submit-time
+  // client-side check) must not have that signal silently dropped here. Without this, a shop
+  // could change a price between whenever the customer last saw it and the moment checkout
+  // actually runs, and the order would be created at the new price with no indication anywhere
+  // in the response — confirmed live (a 100% price increase went through as a normal 201).
+  // Deliberately keyed off "was `expectedPrice` provided at all" (each `changedPriceItems` entry
+  // only exists when the caller sent `expectedPrice` for that item — see
+  // `buildValidatedCartSnapshot`'s `priceChanged` check) rather than always blocking on any
+  // computed price difference — an older/non-browser caller that never sends `expectedPrice`
+  // keeps today's existing behavior (checkout proceeds at the live price) rather than being
+  // newly broken by a check it has no way to satisfy.
+  if (snapshot.changedPriceItems.length > 0) {
+    throw createHttpError(
+      400,
+      'Prices changed for one or more items in your cart. Please review the updated prices and try again.',
+      {
+        code: 'CART_PRICE_CHANGED',
+        validation: {
+          invalidItems: snapshot.invalidItems,
+          outOfStockItems: snapshot.outOfStockItems,
+          changedPriceItems: snapshot.changedPriceItems,
+          appliedItems: snapshot.appliedItems,
+          summary: snapshot.summary,
+        },
+      },
+    )
   }
 
   return snapshot

@@ -229,6 +229,33 @@ async function inventoryRequest<T>(
     if (!response.ok) {
       const message = await readInventoryError(response)
 
+      // Bug found via live cross-repo testing 2026-08-09: when a shop's mapped
+      // NearCart-Inventory organization/branch is not `ACTIVE` (e.g. suspended — see
+      // `marketplace.service.ts`'s `getMarketplaceOrganization`/`getMarketplaceBranch`, which every
+      // catalog/availability-check call goes through), the bridge 404s with
+      // "Active organization not found" / "Active branch not found for this organization". Left
+      // unhandled, that internal-implementation-detail string was passed straight through to
+      // customer-facing responses (`GET /public/shops/:slug/catalog`, `POST
+      // /public/cart/validate`, and checkout) as a plain 404 — confusing wording (a customer has no
+      // concept of an "organization"), and a 404 status code is also semantically wrong here: the
+      // shop itself still exists in NearCart's own DB and is still listed, it's the back-office
+      // link that's temporarily down, which is a 503-shaped situation, not a "this thing doesn't
+      // exist" one. Deliberately narrow to these two exact upstream messages — every other 4xx from
+      // this bridge (most importantly "Active product not found", the genuinely-a-404 case for a
+      // single discontinued/missing item within an otherwise fine shop) must keep passing through
+      // unchanged below.
+      if (
+        response.status === 404 &&
+        (message === 'Active organization not found' ||
+          message === 'Active branch not found for this organization')
+      ) {
+        throw createHttpError(
+          503,
+          'This shop is temporarily unavailable. Please check back later.',
+          { code: 'SHOP_UNAVAILABLE' },
+        )
+      }
+
       // Pass through the upstream bridge's own 4xx (e.g. 404 for a product/org that doesn't
       // exist, 400 for a bad request) instead of flattening it to a generic 502 — found via
       // live testing 2026-07-29: `GET /public/shops/:slug/catalog/:productId` for a nonexistent

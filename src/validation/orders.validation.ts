@@ -30,12 +30,24 @@ const checkoutPayloadSchema = z.object({
   // authoritative checkout subtotal inside orders.service.ts's createOrder(); never trusted for
   // the discount amount itself, only the code string.
   couponCode: z.string().trim().optional().or(z.literal('')),
+  // `expectedPrice`/`expectedMrp` are optional and only used, when present, to detect a price
+  // change between whenever the client last saw this item's price and the moment checkout is
+  // actually submitted — see `getAuthoritativeCheckoutSnapshot`/`createOrderLocked` in
+  // `orders.service.ts`. Bug found via live cross-repo testing 2026-08-09: this endpoint used to
+  // only accept `productId`/`variantId`/`quantity`, so even a client that wanted to guard against
+  // a mid-checkout price change (the way `POST /public/cart/validate` already supports via these
+  // same two fields) structurally could not — the fields were stripped by this very `.pick()`
+  // before ever reaching validation. Kept optional so older/non-browser callers that don't send
+  // them are unaffected; only a caller that does provide `expectedPrice` gets the changed-price
+  // check enforced.
   items: z
     .array(
       cartValidationItemSchema.pick({
         productId: true,
         variantId: true,
         quantity: true,
+        expectedPrice: true,
+        expectedMrp: true,
       }),
     )
     .min(1, 'At least one cart item is required'),
