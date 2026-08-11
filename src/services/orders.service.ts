@@ -373,9 +373,21 @@ async function createOrderLocked(
     options.customerUserId,
     normalizeOptionalString(payload.addressId),
   )
+
+  // Resolved before `getAuthoritativeCheckoutSnapshot` (not after, as before) so checkout's
+  // delivery-fee distance calculation runs on the literal same coordinates as
+  // `POST /public/cart/validate` — a second, divergent resolution here previously left checkout
+  // silently unable to compute a distance-based fee even after cart-preview could. See the
+  // 2026-08-09 price-drift bug fix for why single-sourcing this matters.
+  const effectiveLatitude = customerAddress?.latitude ?? payload.latitude ?? null
+  const effectiveLongitude =
+    customerAddress?.longitude ?? payload.longitude ?? null
+
   const checkoutSnapshot = await getAuthoritativeCheckoutSnapshot({
     shopId: payload.shopId,
     items: payload.items,
+    latitude: effectiveLatitude,
+    longitude: effectiveLongitude,
   })
   const { shop } = checkoutSnapshot
 
@@ -394,10 +406,6 @@ async function createOrderLocked(
       },
     )
   }
-
-  const effectiveLatitude = customerAddress?.latitude ?? payload.latitude ?? null
-  const effectiveLongitude =
-    customerAddress?.longitude ?? payload.longitude ?? null
 
   assertWithinServiceArea(shop, effectiveLatitude, effectiveLongitude)
 

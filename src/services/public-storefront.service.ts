@@ -14,7 +14,7 @@ import {
 } from './inventory-client.service'
 import { getWeatherFeeForCondition, getWeatherImpact } from './weather.service'
 import { createHttpError } from '../utils/httpError'
-import { assertWithinServiceArea, haversineDistanceKm } from '../utils/geo'
+import { assertWithinServiceArea, computeDeliveryFee, haversineDistanceKm } from '../utils/geo'
 import { assertShopIsOpenToday, getShopTodayStatus } from '../utils/shop-availability'
 import type {
   CartValidationItemInput,
@@ -392,7 +392,30 @@ async function buildValidatedCartSnapshot(
     (total, item) => total + (item.price ?? 0) * item.quantity,
     0,
   )
-  const deliveryFee = shop.deliveryEnabled ? shop.deliveryFeeDefault : 0
+  // Distance-based delivery fee when we actually have both shop and customer coordinates to
+  // measure between; same fail-open posture as `assertWithinServiceArea` (utils/geo.ts) for
+  // missing coordinates — fall back to the shop's flat `deliveryFeeDefault` rather than blocking
+  // or charging nothing, since there's nothing to compute a distance against.
+  let deliveryFee = 0
+
+  if (shop.deliveryEnabled) {
+    if (
+      shop.latitude != null &&
+      shop.longitude != null &&
+      payload.latitude != null &&
+      payload.longitude != null
+    ) {
+      const distanceKm = haversineDistanceKm(
+        shop.latitude,
+        shop.longitude,
+        payload.latitude,
+        payload.longitude,
+      )
+      deliveryFee = computeDeliveryFee(distanceKm)
+    } else {
+      deliveryFee = shop.deliveryFeeDefault
+    }
+  }
 
   // Weather is only worth checking for a delivery that's actually happening (deliveryEnabled)
   // and only resolvable when the shop has real coordinates — otherwise there's nothing to charge
@@ -839,10 +862,19 @@ async function getAuthoritativeCheckoutSnapshot(payload: {
     expectedMrp?: number | null
   }>
   lang?: string | null
+  // Forwarded into `buildValidatedCartSnapshot` so the delivery-fee distance calculation there
+  // has real coordinates to work with at checkout time, not just at cart-validate time — without
+  // these, checkout would silently fall back to the flat `deliveryFeeDefault` even though
+  // `buildValidatedCartSnapshot` supports distance-based pricing (see caller in
+  // `orders.service.ts`'s `createOrderLocked`, which now resolves these before this call).
+  latitude?: number | null
+  longitude?: number | null
 }) {
   const snapshot = await buildValidatedCartSnapshot({
     shopId: payload.shopId,
     lang: payload.lang ?? undefined,
+    latitude: payload.latitude,
+    longitude: payload.longitude,
     items: payload.items.map((item) => ({
       productId: item.productId,
       variantId: item.variantId ?? undefined,

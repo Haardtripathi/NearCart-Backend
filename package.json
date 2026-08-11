@@ -11,7 +11,7 @@
     "build": "npm run clean && tsc -p tsconfig.json",
     "start": "node dist/server.js",
     "dev": "tsx watch src/server.ts",
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "vitest run",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",
@@ -48,10 +48,13 @@
     "@types/node": "^24.7.2",
     "@types/node-cron": "^3.0.11",
     "@types/nodemailer": "^7.0.12",
+    "@types/supertest": "^6.0.3",
     "nodemon": "^3.1.14",
     "prisma": "^7.6.0",
+    "supertest": "^7.2.2",
     "tsx": "^4.20.6",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10"
   },
   "allowScripts": {
     "@firebase/util@1.15.1": true,

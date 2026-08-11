@@ -130,6 +130,14 @@ const env = {
   weatherApiKey: process.env.WEATHER_API_KEY || '',
   defaultServiceRadiusKm:
     Number.parseFloat(process.env.DEFAULT_SERVICE_RADIUS_KM || '') || 10,
+  // Distance-based delivery fee formula (see `utils/geo.ts`'s `computeDeliveryFee`):
+  // fee = clamp(deliveryFeeBase + deliveryFeePerKm * distanceKm, deliveryFeeMin, deliveryFeeMax).
+  // These are placeholder business figures, not a tuned pricing model — override via env once
+  // real cost data exists.
+  deliveryFeeBase: parseInteger(process.env.DELIVERY_FEE_BASE, 20),
+  deliveryFeePerKm: parseInteger(process.env.DELIVERY_FEE_PER_KM, 8),
+  deliveryFeeMin: parseInteger(process.env.DELIVERY_FEE_MIN, 20),
+  deliveryFeeMax: parseInteger(process.env.DELIVERY_FEE_MAX, 150),
   // Number of reverse-proxy hops Express should trust when deriving the
   // client IP from X-Forwarded-For (e.g. 1 behind a single nginx/Render/
   // Railway/Heroku-style proxy). Defaults to 1 in production — nearly every

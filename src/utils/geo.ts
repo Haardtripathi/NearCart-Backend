@@ -33,6 +33,24 @@ function haversineDistanceKm(
   return EARTH_RADIUS_KM * c
 }
 
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max)
+}
+
+/**
+ * Distance-based delivery fee: `baseFee + perKmRate * distanceKm`, clamped to
+ * [minFee, maxFee] and rounded to the nearest rupee (money in this schema is `Int`).
+ *
+ * The base/per-km/min/max constants are placeholder business figures pulled from env
+ * (`deliveryFeeBase`/`deliveryFeePerKm`/`deliveryFeeMin`/`deliveryFeeMax`, see `config/env.ts`)
+ * — this is a deliberately simple linear formula, not a tuned pricing model. Swap it out once
+ * there's real cost data (fuel, driver payout curve, etc.) to base it on.
+ */
+function computeDeliveryFee(distanceKm: number): number {
+  const rawFee = env.deliveryFeeBase + env.deliveryFeePerKm * distanceKm
+  return Math.round(clamp(rawFee, env.deliveryFeeMin, env.deliveryFeeMax))
+}
+
 /**
  * Service-area gating: rejects checkout (or, since the cart/validate-vs-checkout mismatch fix,
  * cart validation) when the delivery location is farther from the shop than its configured
@@ -88,4 +106,4 @@ function assertWithinServiceArea(
   }
 }
 
-export { assertWithinServiceArea, haversineDistanceKm }
+export { assertWithinServiceArea, computeDeliveryFee, haversineDistanceKm }
