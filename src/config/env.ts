@@ -77,9 +77,15 @@ const env = {
   inventoryServiceUrl:
     process.env.INVENTORY_API_BASE_URL || process.env.INVENTORY_SERVICE_URL || '',
   inventoryInternalToken: process.env.INVENTORY_INTERNAL_TOKEN || '',
+  // Bug found live 2026-08-15: the Inventory marketplace bridge's real response time on
+  // production (catalog/availability calls) measured 7.7-9.0s, right at/over the old 8000ms
+  // default — causing shop catalog browsing and checkout to fail with a 504 roughly half the
+  // time. 20s leaves real margin above the measured ceiling; the underlying slowness is on
+  // NearCart-Inventory's side and out of scope to fix from here, this is the client-side
+  // mitigation.
   inventoryRequestTimeoutMs: parseInteger(
     process.env.INVENTORY_REQUEST_TIMEOUT_MS,
-    8000,
+    20000,
   ),
   databaseUrl,
   // Only needed for a remote libSQL/Turso database (empty/undefined for a local `file:` URL,
