@@ -7,8 +7,8 @@ import { schedule } from 'node-cron'
  * fails to fire (e.g. mid-restart).
  */
 const KEEP_ALIVE_URLS = [
-  'https://nearcart-backend.onrender.com/api/health',
-  'https://nearcart-inventory-backend.onrender.com/api/health',
+  'https://nearcart-backend-1.onrender.com/api/health',
+  'https://nearcart-inventory-backend-uf5i.onrender.com/api/health',
 ]
 
 const REQUEST_TIMEOUT_MS = 20_000
