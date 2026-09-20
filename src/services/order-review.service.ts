@@ -1,3 +1,5 @@
+import { Prisma } from '@prisma/client'
+
 import prisma from '../lib/prisma'
 import { writeAuditLog } from './audit.service'
 import { createHttpError } from '../utils/httpError'
@@ -7,6 +9,35 @@ import type { CreateOrderReviewInput, ShopReviewsQueryInput } from '../validatio
 interface CreateOrderReviewOptions {
   orderId: string
   customerUserId: string
+}
+
+/**
+ * Detects a `OrderReview.orderId` unique-constraint violation specifically (not any other P2002
+ * this create could theoretically raise). Mirrors `orders.service.ts`'s `isOrderNumberConflict`
+ * exactly, including checking both possible `meta` shapes — confirmed there, on this app's actual
+ * `@prisma/adapter-libsql` setup, that the violated-field list is sometimes NOT under the
+ * standard `meta.target` array but nested under `meta.driverAdapterError.cause.constraint.fields`
+ * instead, so relying on `target` alone would silently never match here.
+ */
+function isOrderReviewUniqueConstraintConflict(error: unknown): boolean {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') {
+    return false
+  }
+
+  const meta = error.meta as
+    | { target?: unknown; driverAdapterError?: { cause?: { constraint?: { fields?: unknown } } } }
+    | undefined
+
+  const targetFields = Array.isArray(meta?.target) ? (meta?.target as unknown[]) : []
+  const driverAdapterFields = Array.isArray(meta?.driverAdapterError?.cause?.constraint?.fields)
+    ? (meta?.driverAdapterError?.cause?.constraint?.fields as unknown[])
+    : []
+
+  if ([...targetFields, ...driverAdapterFields].includes('orderId')) {
+    return true
+  }
+
+  return typeof error.message === 'string' && /unique constraint failed/i.test(error.message) && error.message.includes('orderId')
 }
 
 function mapOrderReview(review: {
@@ -98,15 +129,35 @@ async function createOrderReview(
     )
   }
 
-  const review = await prisma.orderReview.create({
-    data: {
-      orderId: order.id,
-      customerId: options.customerUserId,
-      shopId: order.shopRecordId,
-      rating: payload.rating,
-      comment: normalizeOptionalString(payload.comment),
-    },
-  })
+  // Adversarial sweep finding: `order.review` above is a plain read-then-check — two concurrent
+  // `POST /orders/:orderId/review` calls for the same order (a double-tap before the submit
+  // button disables, or a client retry racing its own original request) can both pass that check
+  // before either commits, then both attempt this `create()`. `OrderReview.orderId` is `@unique`
+  // (see the doc comment above this function), so the DB itself correctly rejects the second
+  // write — but left uncaught here, that surfaces as a raw Prisma `P2002` unique-constraint
+  // exception, which `errorHandler.ts` treats as an unknown error (masked to a generic 500 in
+  // production) rather than the clean, actionable 409 the exact same "already reviewed" case
+  // gets one line up when it loses the read-then-check race instead of the write race. Catching
+  // it here and mapping to the same 409 makes both racing requests behave identically regardless
+  // of which one actually wins the DB write.
+  let review
+  try {
+    review = await prisma.orderReview.create({
+      data: {
+        orderId: order.id,
+        customerId: options.customerUserId,
+        shopId: order.shopRecordId,
+        rating: payload.rating,
+        comment: normalizeOptionalString(payload.comment),
+      },
+    })
+  } catch (error) {
+    if (isOrderReviewUniqueConstraintConflict(error)) {
+      throw createHttpError(409, 'This order has already been reviewed.')
+    }
+
+    throw error
+  }
 
   await writeAuditLog({
     actorId: options.customerUserId,

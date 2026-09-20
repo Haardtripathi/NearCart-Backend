@@ -365,6 +365,19 @@ async function updateShop(
  * `todayStatusUpdatedAt` is stamped with the current time on every call, which is exactly what
  * `getShopTodayStatus` needs to tell "confirmed today" apart from "confirmed some previous day."
  */
+// The actual column writes, shared with the internal service-to-service variant
+// (`internal-shop-status.service.ts` — the NearCart-Inventory Partner app's "open today" switch)
+// so both entry points can never drift on the reason-clearing / timestamp rules above.
+function buildShopTodayStatusData(payload: UpdateShopTodayStatusInput) {
+  return {
+    isOpenToday: payload.isOpen,
+    todayStatusReason: payload.isOpen
+      ? null
+      : normalizeOptionalString(payload.reason),
+    todayStatusUpdatedAt: new Date(),
+  }
+}
+
 async function updateShopTodayStatus(
   userId: string,
   shopId: string,
@@ -387,13 +400,7 @@ async function updateShopTodayStatus(
     where: {
       id: shopId,
     },
-    data: {
-      isOpenToday: payload.isOpen,
-      todayStatusReason: payload.isOpen
-        ? null
-        : normalizeOptionalString(payload.reason),
-      todayStatusUpdatedAt: new Date(),
-    },
+    data: buildShopTodayStatusData(payload),
   })
 
   // Deliberately flat (not this file's usual `{ item, meta }` wrapping) — matches the exact
@@ -427,6 +434,7 @@ async function assertShopOwnership(userId: string, shopId: string): Promise<void
 
 export {
   assertShopOwnership,
+  buildShopTodayStatusData,
   createShop,
   getShopOwnerProfile,
   getShopOwnerShop,

@@ -6,6 +6,27 @@ const optionalTrimmedString = z
   .optional()
   .or(z.literal(''))
 
+// Adversarial sweep bug fix: none of the free-text query/body fields below had an upper bound —
+// same unbounded-length gap found and fixed across customer/shop-owner/auth/orders validation,
+// closed here too. This endpoint set is entirely unauthenticated (public catalog browsing +
+// cart validation), so it's the most exposed surface of the four to an oversized-payload probe —
+// e.g. an arbitrarily long `q` search string, or a `productId`/`variantId` far longer than any
+// real cuid, both previously accepted and forwarded as-is into the inventory-bridge fan-out.
+const MAX_QUERY_TEXT_LENGTH = 100
+const MAX_ID_LENGTH = 100
+// A real customer cart realistically has a handful to a few dozen distinct line items — this is
+// a generous ceiling, not a realistic-usage limit. Bounds the unauthenticated cart-validate
+// endpoint's `items` array (previously `.min(1)` with no upper bound at all), so a single request
+// can't force an arbitrarily large availability-check fan-out to the inventory bridge.
+const MAX_CART_ITEMS = 200
+
+const boundedOptionalTrimmedString = z
+  .string()
+  .trim()
+  .max(MAX_QUERY_TEXT_LENGTH)
+  .optional()
+  .or(z.literal(''))
+
 // Optional ad-hoc customer coordinates, used server-side (only) to compute
 // the live delivery-ETA distance term — see `delivery-eta.service.ts` /
 // `attachLiveEta` in `public-storefront.service.ts`. Anonymous browsing
@@ -17,55 +38,56 @@ const shopGeoQuerySchema = z.object({
 })
 
 const shopListQuerySchema = shopGeoQuerySchema.extend({
-  search: optionalTrimmedString,
-  category: optionalTrimmedString,
-  city: optionalTrimmedString,
+  search: boundedOptionalTrimmedString,
+  category: boundedOptionalTrimmedString,
+  city: boundedOptionalTrimmedString,
 })
 
-const publicSearchQuerySchema = z.object({
-  q: z.string().trim().min(2, 'Search query must be at least 2 characters'),
-  category: optionalTrimmedString,
-  city: optionalTrimmedString,
+const publicSearchQuerySchema = shopGeoQuerySchema.extend({
+  q: z.string().trim().min(2, 'Search query must be at least 2 characters').max(MAX_QUERY_TEXT_LENGTH),
+  category: boundedOptionalTrimmedString,
+  city: boundedOptionalTrimmedString,
   limit: z.coerce.number().int().min(1).max(60).default(24),
-  lang: optionalTrimmedString,
+  lang: boundedOptionalTrimmedString,
 })
 
-const publicTrendingQuerySchema = z.object({
-  category: optionalTrimmedString,
-  city: optionalTrimmedString,
+const publicTrendingQuerySchema = shopGeoQuerySchema.extend({
+  category: boundedOptionalTrimmedString,
+  city: boundedOptionalTrimmedString,
   limit: z.coerce.number().int().min(1).max(40).default(20),
-  lang: optionalTrimmedString,
+  lang: boundedOptionalTrimmedString,
 })
 
 const shopCatalogQuerySchema = z.object({
-  search: optionalTrimmedString,
-  category: optionalTrimmedString,
-  brand: optionalTrimmedString,
+  search: boundedOptionalTrimmedString,
+  category: boundedOptionalTrimmedString,
+  brand: boundedOptionalTrimmedString,
   inStockOnly: z.coerce.boolean().optional(),
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(20),
   sort: z
     .enum(['featured', 'name-asc', 'price-asc', 'price-desc', 'newest'])
     .default('featured'),
-  lang: optionalTrimmedString,
+  lang: boundedOptionalTrimmedString,
   lat: z.coerce.number().min(-90).max(90).optional(),
   lng: z.coerce.number().min(-180).max(180).optional(),
 })
 
 const cartValidationItemSchema = z.object({
-  productId: z.string().trim().min(1, 'Product identifier is required'),
-  variantId: optionalTrimmedString,
+  productId: z.string().trim().min(1, 'Product identifier is required').max(MAX_ID_LENGTH),
+  variantId: boundedOptionalTrimmedString,
   quantity: z.number().int().min(1, 'Quantity must be at least 1'),
   expectedPrice: z.number().min(0).optional(),
   expectedMrp: z.number().min(0).nullable().optional(),
 })
 
 const publicCartValidationSchema = z.object({
-  shopId: z.string().trim().min(1, 'Shop identifier is required'),
+  shopId: z.string().trim().min(1, 'Shop identifier is required').max(MAX_ID_LENGTH),
   items: z
     .array(cartValidationItemSchema)
-    .min(1, 'At least one cart item is required'),
-  lang: optionalTrimmedString,
+    .min(1, 'At least one cart item is required')
+    .max(MAX_CART_ITEMS, `A cart can contain at most ${MAX_CART_ITEMS} distinct items`),
+  lang: boundedOptionalTrimmedString,
   // Optional ad-hoc customer coordinates. Added so `/public/cart/validate` can enforce the same
   // service-radius check `POST /orders` already enforces at checkout (previously this endpoint
   // had no way to receive customer coordinates at all, so a cart 440km from the shop would

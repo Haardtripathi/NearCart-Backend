@@ -1,6 +1,7 @@
 import type { Coupon, Prisma } from '@prisma/client'
 
 import prisma from '../lib/prisma'
+import { kvDel, kvSetNx } from '../lib/kvStore'
 import { createHttpError } from '../utils/httpError'
 
 type DbClient = Prisma.TransactionClient | typeof prisma
@@ -168,6 +169,12 @@ async function resolveCouponForCheckout(
   return { coupon, discountAmount }
 }
 
+const COUPON_REDEMPTION_LOCK_TTL_SECONDS = 10
+
+function couponRedemptionLockKey(couponId: string): string {
+  return `coupon-redemption-lock:${couponId}`
+}
+
 /**
  * Second half of applying a coupon — called after the `Order` row exists (a `CouponRedemption`
  * has a required, unique `orderId` FK), in the same transaction as `resolveCouponForCheckout`
@@ -175,15 +182,26 @@ async function resolveCouponForCheckout(
  * `resolveCouponForCheckout`) so an order-creation failure after resolution but before this call
  * can't leave a coupon's usage count incremented for an order that never actually landed.
  *
- * The bump is a conditional `updateMany` (re-checking `timesRedeemed < usageLimit`), not a bare
- * `update`/increment — `resolveCouponForCheckout`'s own usageLimit check ran earlier in this
- * same transaction against a snapshot that can be stale by the time this call commits if two
- * checkouts for the same near-exhausted coupon race each other: both could pass that earlier
- * check and an unconditional increment here would let `timesRedeemed` exceed `usageLimit`.
- * Re-evaluating the limit atomically as part of this write means only one of two racing "last
- * redemption" checkouts can match zero rows; that one gets a clear conflict and its whole order
- * transaction (including this redemption) rolls back — the other's coupon usage is honored
- * correctly instead of both silently going through.
+ * The bump was originally just a conditional `updateMany` (re-checking `timesRedeemed <
+ * usageLimit`) with no separate lock — the same "one atomic conditional write is enough" pattern
+ * this doc comment used to justify on its own. Adversarial sweep testing of the *exact same*
+ * pattern elsewhere (`auth.service.ts`'s refresh-token rotation) found live, on this app's real
+ * remote libSQL/Turso database, that two concurrent conditional `updateMany` calls against the
+ * same row can BOTH match and BOTH report `count: 1` — Turso's HTTP-based execution does not
+ * appear to serialize two independent conditional UPDATEs against one row as strictly as a local
+ * SQLite file would. That call there was a bare statement outside any `$transaction`; this one
+ * runs inside `orders.service.ts`'s interactive `prisma.$transaction()` for the whole checkout,
+ * which may or may not fully close the same gap on this adapter — untested here (reproducing it
+ * needs a real concurrent checkout against a shop confirmed open today, not available in this
+ * sweep), and not worth gambling a usage-limited coupon's correctness on an unverified assumption
+ * either way. `kvSetNx` — the same real-Redis-backed primitive `orders.service.ts`'s checkout
+ * lock and `auth.service.ts`'s refresh-rotation lock both already rely on for this exact shape of
+ * problem — wraps this function so only one caller can be inside it for a given coupon at a time,
+ * regardless of the DB's own isolation behavior. Scoped to the coupon (not the customer, unlike
+ * the checkout lock), since the race that matters here is two *different* customers both trying
+ * to claim the last unit of a usage-limited coupon at once. Held only for this function's own
+ * duration (acquire/release both here), so it composes safely with `createOrderTransactionWithRetry`
+ * retrying the whole outer transaction — each retry attempt just calls this fresh.
  */
 async function recordCouponRedemption(
   transaction: Prisma.TransactionClient,
@@ -195,29 +213,47 @@ async function recordCouponRedemption(
     usageLimit: number | null
   },
 ): Promise<void> {
-  await transaction.couponRedemption.create({
-    data: {
-      couponId: input.couponId,
-      userId: input.userId,
-      orderId: input.orderId,
-      discountAmount: input.discountAmount,
-    },
-  })
+  const lockKey = couponRedemptionLockKey(input.couponId)
+  const lockAcquired = await kvSetNx(lockKey, '1', COUPON_REDEMPTION_LOCK_TTL_SECONDS)
 
-  const result = await transaction.coupon.updateMany({
-    where:
-      input.usageLimit == null
-        ? { id: input.couponId }
-        : { id: input.couponId, timesRedeemed: { lt: input.usageLimit } },
-    data: { timesRedeemed: { increment: 1 } },
-  })
-
-  if (result.count === 0) {
+  if (!lockAcquired) {
     throw createHttpError(
       409,
       'This coupon was just fully redeemed by someone else — please remove it and try again.',
       { code: 'COUPON_RACE_CONFLICT' },
     )
+  }
+
+  try {
+    await transaction.couponRedemption.create({
+      data: {
+        couponId: input.couponId,
+        userId: input.userId,
+        orderId: input.orderId,
+        discountAmount: input.discountAmount,
+      },
+    })
+
+    // Still a conditional `updateMany` (not a bare increment) as defense in depth — cheap, and
+    // correct regardless of whether the lock above is what actually ends up doing the real work
+    // of preventing overselling on this specific DB/adapter combination.
+    const result = await transaction.coupon.updateMany({
+      where:
+        input.usageLimit == null
+          ? { id: input.couponId }
+          : { id: input.couponId, timesRedeemed: { lt: input.usageLimit } },
+      data: { timesRedeemed: { increment: 1 } },
+    })
+
+    if (result.count === 0) {
+      throw createHttpError(
+        409,
+        'This coupon was just fully redeemed by someone else — please remove it and try again.',
+        { code: 'COUPON_RACE_CONFLICT' },
+      )
+    }
+  } finally {
+    await kvDel(lockKey)
   }
 }
 

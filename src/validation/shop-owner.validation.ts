@@ -6,7 +6,29 @@ const optionalTrimmedString = z
   .optional()
   .or(z.literal(''))
 
-const optionalCoordinate = z.number().finite().optional().nullable()
+// Same shape as `optionalTrimmedString` but with an upper bound — see customer.validation.ts's
+// identical helper for why a plain `.pipe()` doesn't work here.
+function optionalTrimmedStringMax(max: number) {
+  return z.string().trim().max(max).optional().or(z.literal(''))
+}
+
+// Adversarial sweep bug fix: this used to be `z.number().finite().optional().nullable()` for both
+// axes — accepted any finite number, including nonsense like latitude 999. See
+// customer.validation.ts's identical fix (this file had its own copy of the same gap) for the
+// full rationale.
+const optionalLatitude = z.number().finite().min(-90).max(90).optional().nullable()
+const optionalLongitude = z.number().finite().min(-180).max(180).optional().nullable()
+
+// Adversarial sweep bug fix: none of these free-text fields had an upper bound (see
+// customer.validation.ts's identical fix for the live-confirmed unbounded-length repro).
+const MAX_NAME_LENGTH = 150
+const MAX_SHOP_NAME_LENGTH = 150
+const MAX_DESCRIPTION_LENGTH = 2000
+const MAX_CATEGORY_LENGTH = 100
+const MAX_PHONE_LENGTH = 20
+const MAX_ADDRESS_LINE_LENGTH = 200
+const MAX_CITY_AREA_LENGTH = 100
+const MAX_PINCODE_LENGTH = 20
 
 const updateShopOwnerProfileSchema = z
   .object({
@@ -14,12 +36,14 @@ const updateShopOwnerProfileSchema = z
       .string()
       .trim()
       .min(2, 'Full name must be at least 2 characters')
+      .max(MAX_NAME_LENGTH)
       .optional(),
     phone: optionalTrimmedString,
     businessName: z
       .string()
       .trim()
       .min(2, 'Business name must be at least 2 characters')
+      .max(MAX_NAME_LENGTH)
       .optional(),
     gstNumber: optionalTrimmedString,
   })
@@ -29,19 +53,19 @@ const updateShopOwnerProfileSchema = z
   )
 
 const createShopSchema = z.object({
-  name: z.string().trim().min(2, 'Shop name must be at least 2 characters'),
-  description: optionalTrimmedString,
+  name: z.string().trim().min(2, 'Shop name must be at least 2 characters').max(MAX_SHOP_NAME_LENGTH),
+  description: optionalTrimmedStringMax(MAX_DESCRIPTION_LENGTH),
   logoImageUrl: z.string().trim().url().optional().or(z.literal('')),
-  category: z.string().trim().min(2, 'Category is required'),
-  phone: z.string().trim().min(6, 'Phone number is required'),
+  category: z.string().trim().min(2, 'Category is required').max(MAX_CATEGORY_LENGTH),
+  phone: z.string().trim().min(6, 'Phone number is required').max(MAX_PHONE_LENGTH),
   email: optionalTrimmedString,
-  addressLine1: z.string().trim().min(1, 'Address line 1 is required'),
-  addressLine2: optionalTrimmedString,
-  city: z.string().trim().min(1, 'City is required'),
-  area: optionalTrimmedString,
-  pincode: z.string().trim().min(1, 'Pincode is required'),
-  latitude: optionalCoordinate,
-  longitude: optionalCoordinate,
+  addressLine1: z.string().trim().min(1, 'Address line 1 is required').max(MAX_ADDRESS_LINE_LENGTH),
+  addressLine2: optionalTrimmedStringMax(MAX_ADDRESS_LINE_LENGTH),
+  city: z.string().trim().min(1, 'City is required').max(MAX_CITY_AREA_LENGTH),
+  area: optionalTrimmedStringMax(MAX_CITY_AREA_LENGTH),
+  pincode: z.string().trim().min(1, 'Pincode is required').max(MAX_PINCODE_LENGTH),
+  latitude: optionalLatitude,
+  longitude: optionalLongitude,
   openingTime: optionalTrimmedString,
   closingTime: optionalTrimmedString,
   deliveryEnabled: z.boolean().optional(),

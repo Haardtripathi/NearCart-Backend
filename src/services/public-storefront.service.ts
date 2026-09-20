@@ -537,7 +537,23 @@ async function listPublicShops(
 // "Pharmacy", ...) — deliberately NOT the deeper per-shop product-category system from the
 // inventory bridge (that stays scoped to listPublicShopCatalog's `filters.categories`, unchanged).
 // Powers a home-page "browse by shop type" strip, Swiggy/Blinkit-style.
-async function listPublicShopCategories() {
+async function listPublicShopCategories(customerCoordinates?: CustomerCoordinates | null) {
+  // Coordinates known: only count shops that can actually deliver there, so the home category
+  // grid never leads to an empty "No shops found" screen (same rule as listPublicShops).
+  if (customerCoordinates) {
+    const shops = await prisma.shop.findMany({ where: PUBLIC_MAPPED_SHOP_WHERE })
+    const counts = new Map<string, number>()
+    for (const shop of filterShopsInServiceRange(shops, customerCoordinates)) {
+      counts.set(shop.category, (counts.get(shop.category) ?? 0) + 1)
+    }
+
+    return {
+      items: [...counts.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .map(([category, shopCount]) => ({ category, shopCount })),
+    }
+  }
+
   const grouped = await prisma.shop.groupBy({
     by: ['category'],
     where: PUBLIC_MAPPED_SHOP_WHERE,
@@ -553,11 +569,32 @@ async function listPublicShopCategories() {
   }
 }
 
+// Same hyperlocal rule as listPublicShops: a shop is "near" only if the customer is inside the
+// shop's own `serviceRadiusKm` (falling back to DEFAULT_SHOP_MATCH_RADIUS_KM), and a shop with no
+// coordinates of its own is excluded rather than guessed at. Nearest first.
+function filterShopsInServiceRange(shops: Shop[], customerCoordinates: CustomerCoordinates): Shop[] {
+  return shops
+    .filter((shop) => shop.latitude != null && shop.longitude != null)
+    .map((shop) => ({
+      shop,
+      distanceKm: haversineDistanceKm(
+        customerCoordinates.latitude,
+        customerCoordinates.longitude,
+        shop.latitude as number,
+        shop.longitude as number,
+      ),
+    }))
+    .filter(({ shop, distanceKm }) => distanceKm <= (shop.serviceRadiusKm ?? DEFAULT_SHOP_MATCH_RADIUS_KM))
+    .sort((a, b) => a.distanceKm - b.distanceKm)
+    .map(({ shop }) => shop)
+}
+
 async function fetchCandidateShops(
   filters: { category?: string | null; city?: string | null } | undefined,
   take: number,
+  customerCoordinates?: CustomerCoordinates | null,
 ): Promise<Shop[]> {
-  return prisma.shop.findMany({
+  const shops = await prisma.shop.findMany({
     where: {
       ...PUBLIC_MAPPED_SHOP_WHERE,
       ...(filters?.category ? { category: filters.category } : {}),
@@ -566,8 +603,15 @@ async function fetchCandidateShops(
       ...(filters?.city ? { city: { contains: filters.city } } : {}),
     },
     orderBy: [{ createdAt: 'desc' }, { name: 'asc' }],
-    take,
+    // With coordinates the fan-out cap has to apply AFTER the distance filter — capping first
+    // would let far-away shops crowd the nearby ones out of the candidate set entirely.
+    ...(customerCoordinates ? {} : { take }),
   })
+
+  // BUG FIX (found on-device 2026-09-19): trending/search ignored the customer's location, so
+  // the home screen advertised products from shops that weren't in "Shops near you" and
+  // couldn't deliver to them. No coordinates supplied = unchanged legacy behavior.
+  return customerCoordinates ? filterShopsInServiceRange(shops, customerCoordinates).slice(0, take) : shops
 }
 
 interface FannedOutShopCatalog {
@@ -672,12 +716,14 @@ async function searchPublicCatalog(
     city?: string | null
     limit?: number
     language?: string | null
+    customerCoordinates?: CustomerCoordinates | null
   },
 ) {
   const limit = options?.limit ?? 24
   const candidateShops = await fetchCandidateShops(
     { category: options?.category, city: options?.city },
     SEARCH_FANOUT_SHOP_CAP,
+    options?.customerCoordinates,
   )
   const groups = await fanOutCatalogAcrossShops(candidateShops, (shop) => ({
     organizationId: shop.inventoryOrganizationId!,
@@ -706,16 +752,18 @@ async function searchPublicCatalog(
 // v1 "trending" — no analytics/order-count table exists anywhere in this schema, so this is
 // explicitly featured, in-stock items from a capped set of shops, NOT a real popularity
 // ranking. `meta.strategy` says so in the response itself.
-async function listTrendingProducts(options?: {
+async function computeTrendingProducts(options?: {
   category?: string | null
   city?: string | null
   limit?: number
   language?: string | null
+  customerCoordinates?: CustomerCoordinates | null
 }) {
   const limit = options?.limit ?? 20
   const candidateShops = await fetchCandidateShops(
     { category: options?.category, city: options?.city },
     TRENDING_FANOUT_SHOP_CAP,
+    options?.customerCoordinates,
   )
   const groups = await fanOutCatalogAcrossShops(candidateShops, (shop) => ({
     organizationId: shop.inventoryOrganizationId!,
@@ -736,6 +784,43 @@ async function listTrendingProducts(options?: {
       strategy: 'featured-fanout-v1-not-real-trending',
     },
   }
+}
+
+// Trending fans out to every candidate shop's catalog over the inventory bridge — measured at
+// 3-8 s per call on-device 2026-09-20, on the home screen's critical path, and recomputed for
+// every customer even though the answer barely changes minute to minute. A short in-process TTL
+// cache keyed by the query (coordinates rounded to ~100 m so neighbours share an entry) makes
+// repeat loads instant; live stock/price is still re-validated at cart/checkout time.
+const TRENDING_CACHE_TTL_MS = 60_000
+const TRENDING_CACHE_MAX_ENTRIES = 200
+const trendingCache = new Map<
+  string,
+  { expiresAt: number; value: Awaited<ReturnType<typeof computeTrendingProducts>> }
+>()
+
+async function listTrendingProducts(options?: Parameters<typeof computeTrendingProducts>[0]) {
+  const coords = options?.customerCoordinates
+  const cacheKey = JSON.stringify([
+    options?.category ?? null,
+    options?.city ?? null,
+    options?.limit ?? null,
+    options?.language ?? null,
+    coords ? [coords.latitude.toFixed(3), coords.longitude.toFixed(3)] : null,
+  ])
+  const cached = trendingCache.get(cacheKey)
+
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.value
+  }
+
+  const value = await computeTrendingProducts(options)
+
+  if (trendingCache.size >= TRENDING_CACHE_MAX_ENTRIES) {
+    trendingCache.clear()
+  }
+  trendingCache.set(cacheKey, { expiresAt: Date.now() + TRENDING_CACHE_TTL_MS, value })
+
+  return value
 }
 
 async function getPublicShop(

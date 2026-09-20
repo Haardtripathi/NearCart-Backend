@@ -59,7 +59,10 @@ async function listPublicShopCategoriesHandler(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const result = await listPublicShopCategories()
+    const geo = shopGeoQuerySchema.parse(request.query)
+    const result = await listPublicShopCategories(
+      geo.lat != null && geo.lng != null ? { latitude: geo.lat, longitude: geo.lng } : null,
+    )
 
     response.status(200).json({
       ...result,
@@ -85,6 +88,8 @@ async function searchPublicCatalogHandler(
       city: query.city || undefined,
       limit: query.limit,
       language: query.lang || undefined,
+      customerCoordinates:
+        query.lat != null && query.lng != null ? { latitude: query.lat, longitude: query.lng } : null,
     })
 
     response.status(200).json({
@@ -112,6 +117,8 @@ async function listTrendingProductsHandler(
       city: query.city || undefined,
       limit: query.limit,
       language: query.lang || undefined,
+      customerCoordinates:
+        query.lat != null && query.lng != null ? { latitude: query.lat, longitude: query.lng } : null,
     })
 
     response.status(200).json({

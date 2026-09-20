@@ -25,19 +25,25 @@ interface ShopTodayStatusSource {
   todayStatusUpdatedAt: Date | null
 }
 
+const SHOP_LOCAL_TIME_ZONE = 'Asia/Kolkata'
+
+function toShopLocalDayKey(date: Date): string {
+  // en-CA formats as YYYY-MM-DD, which makes a stable comparable day key.
+  return date.toLocaleDateString('en-CA', { timeZone: SHOP_LOCAL_TIME_ZONE })
+}
+
 function getShopTodayStatus(shop: ShopTodayStatusSource): ShopTodayStatus {
   if (shop.todayStatusUpdatedAt == null) {
     return 'PENDING_CONFIRMATION'
   }
 
-  const now = new Date()
-  const updatedAt = shop.todayStatusUpdatedAt
-  const isSameUtcDay =
-    updatedAt.getUTCFullYear() === now.getUTCFullYear() &&
-    updatedAt.getUTCMonth() === now.getUTCMonth() &&
-    updatedAt.getUTCDate() === now.getUTCDate()
+  // "Today" is the shop's calendar day in India, not the UTC day. The original UTC boundary
+  // (see the header note) rolled over at 05:30 IST, so a dairy/bakery owner who opened at 05:00
+  // was silently back to PENDING_CONFIRMATION half an hour later, mid-morning-rush.
+  const isSameLocalDay =
+    toShopLocalDayKey(shop.todayStatusUpdatedAt) === toShopLocalDayKey(new Date())
 
-  if (!isSameUtcDay) {
+  if (!isSameLocalDay) {
     return 'PENDING_CONFIRMATION'
   }
 

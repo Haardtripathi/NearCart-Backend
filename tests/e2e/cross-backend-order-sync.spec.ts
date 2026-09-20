@@ -12,6 +12,9 @@
  * latitude, longitude }` carries the CUSTOMER's coordinates, and `items` carries
  * unitPrice/quantity — but nothing about the shop's own location or the computed `deliveryFee`
  * crosses the bridge at all).
+ * UPDATE: the delivery-fee half of that gap is closed — the push now carries a `payment` block
+ * (method/status/itemTotal/deliveryFee/discountTotal/amountPayable), covered against the mocked
+ * bridge by `inventory-push-payment.spec.ts`. Shop coordinates still do not cross the bridge.
  *
  * Concrete plan for whoever picks this up:
  *

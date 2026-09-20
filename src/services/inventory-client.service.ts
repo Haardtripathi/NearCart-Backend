@@ -415,6 +415,29 @@ interface PushSalesOrderInput {
     unitPrice: number
   }>
   notes?: string | null
+  // Money facts for the shop + driver apps. The Inventory SalesOrder's own `total` only ever means
+  // "goods value" (sum of `items`), so without this block the driver app told the driver to
+  // collect the item total (e.g. 360) instead of what the customer actually owes (e.g. 434 incl.
+  // delivery fee), and had no idea whether the order was prepaid. All amounts are whole rupees —
+  // the same unit as `items[].unitPrice` and every `Int` money column on `Order`.
+  payment?: PushSalesOrderPayment
+}
+
+interface PushSalesOrderPayment {
+  method: 'COD' | 'ONLINE' | 'PAY_ON_PICKUP'
+  status: 'PENDING' | 'PAID' | 'FAILED' | 'REFUNDED'
+  itemTotal: number
+  deliveryFee: number
+  // Sent separately from `deliveryFee` (rather than folded into it) so the shop's bill summary
+  // adds up line by line: itemTotal + deliveryFee + weatherSurchargeFee - discountTotal.
+  weatherSurchargeFee?: number
+  // Combined coupon + loyalty-points discount (`Order.discountAmount`).
+  discountTotal: number
+  // The loyalty-points portion of `discountTotal`, when any points were redeemed.
+  loyaltyDiscount?: number
+  couponCode?: string
+  amountPayable: number
+  currency: 'INR'
 }
 
 interface PushSalesOrderResponse {
@@ -434,6 +457,15 @@ interface InventorySalesOrderStatusResponse {
   // send this field on every deployment yet (it's being added there separately) — code reading
   // this response must treat a missing/undefined value the same as "no photo", not an error.
   deliveryProofPhotoUrl?: string | null
+  // Assigned-driver identity/contact, mirroring the DRIVER_ASSIGNED/DRIVER_UNASSIGNED webhook
+  // payload — added as a poll-path fallback for driver info, since that webhook is
+  // fire-and-forget with no retry on the Inventory side (a dropped webhook used to mean the
+  // customer never learned who was delivering their order, with no way to recover). `undefined`
+  // means an older bridge deployment that doesn't select this relation yet (treat as "no signal,
+  // leave existing driver fields alone"); `null` means the relation was selected and there is
+  // genuinely no driver assigned right now (treat as "clear any stored driver info").
+  assignedDriver?: { fullName: string; phone: string; vehicleType: string } | null
+  driverAssignedAt?: string | null
 }
 
 // NOTE ON PATH PREFIX: the bridge contract this was built against
@@ -467,6 +499,7 @@ async function pushSalesOrderToInventory(
         customer: input.customer,
         items: input.items,
         notes: input.notes ?? undefined,
+        payment: input.payment ?? undefined,
       },
     },
   )
@@ -565,5 +598,6 @@ export type {
   InventoryMarketplaceOption,
   InventorySalesOrderStatusResponse,
   PushSalesOrderInput,
+  PushSalesOrderPayment,
   PushSalesOrderResponse,
 }

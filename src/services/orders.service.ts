@@ -6,7 +6,12 @@ import { kvDel, kvSetNx } from '../lib/kvStore'
 import { writeAuditLog } from './audit.service'
 import { resolveCouponForCheckout, recordCouponRedemption } from './coupon.service'
 import { getDeliveryEtaMinutes } from './delivery-eta.service'
-import { awardLoyaltyPointsForOrder } from './loyalty.service'
+import {
+  awardLoyaltyPointsForOrder,
+  getLoyaltyRedemptionForOrder,
+  recordLoyaltyRedemption,
+  resolveLoyaltyRedemptionForCheckout,
+} from './loyalty.service'
 import { getAuthoritativeCheckoutSnapshot } from './public-storefront.service'
 import { sendPushToCustomer } from './push-notification.service'
 import {
@@ -14,6 +19,7 @@ import {
   getInventorySalesOrderStatus,
   pushSalesOrderToInventory,
 } from './inventory-client.service'
+import type { PushSalesOrderPayment } from './inventory-client.service'
 import { createHttpError } from '../utils/httpError'
 import { assertWithinServiceArea } from '../utils/geo'
 import { mapOrder } from '../utils/serializers'
@@ -432,6 +438,19 @@ async function createOrderLocked(
       resolvedCoupon = resolution.coupon
     }
 
+    // New feature: loyalty-points redemption, resolved the same two-step way as the coupon
+    // above it (resolve against a pre-order snapshot here, record against the real order once it
+    // exists — see `recordLoyaltyRedemption` below). Stacks with a coupon rather than being
+    // mutually exclusive with one; `resolveLoyaltyRedemptionForCheckout` clamps to whatever's
+    // actually usable (balance + per-order cap) rather than erroring, so this is always safe to
+    // call even when the request is stale or the customer has no points at all (resolves to 0).
+    const loyaltyResolution = await resolveLoyaltyRedemptionForCheckout(transaction, {
+      customerUserId: options.customerUserId,
+      requestedPoints: payload.useLoyaltyPoints ?? 0,
+      subtotal: checkoutSnapshot.summary.subtotal,
+    })
+    const loyaltyDiscountAmount = loyaltyResolution.discountAmount
+
     const order = await transaction.order.create({
       data: {
         orderNumber,
@@ -466,8 +485,15 @@ async function createOrderLocked(
         weatherCondition: checkoutSnapshot.summary.weatherCondition,
         platformFee: 0,
         couponCode: resolvedCoupon?.code ?? null,
-        discountAmount,
-        totalAmount: checkoutSnapshot.summary.totalAmount - discountAmount,
+        // Combined coupon + loyalty-points discount — `Order` has no separate column for the
+        // loyalty portion (avoids a schema change for this), but it stays fully attributable via
+        // the `LoyaltyLedgerEntry` row `recordLoyaltyRedemption` writes below (queried back out by
+        // `getLoyaltyRedemptionForOrder` for the order-detail view / this response).
+        discountAmount: discountAmount + loyaltyDiscountAmount,
+        totalAmount: Math.max(
+          0,
+          checkoutSnapshot.summary.totalAmount - discountAmount - loyaltyDiscountAmount,
+        ),
         createdAt: placedAt,
         placedAt,
         items: {
@@ -502,6 +528,14 @@ async function createOrderLocked(
       })
     }
 
+    if (loyaltyResolution.pointsToRedeem > 0) {
+      await recordLoyaltyRedemption(transaction, {
+        customerUserId: options.customerUserId,
+        orderId: order.id,
+        pointsToRedeem: loyaltyResolution.pointsToRedeem,
+      })
+    }
+
     return order
   })
 
@@ -525,7 +559,9 @@ async function createOrderLocked(
     shop,
   )
 
-  return mapOrder(orderWithSyncState)
+  const loyaltyRedemption = await getLoyaltyRedemptionForOrder(createdOrder.id)
+
+  return { ...mapOrder(orderWithSyncState), loyaltyRedemption }
 }
 
 type OrderWithItems = Prisma.OrderGetPayload<{ include: { items: true } }>
@@ -541,6 +577,51 @@ type OrderWithRelations = Prisma.OrderGetPayload<{
  * back-office system could be reached at that instant. The `FAILED` flag is
  * what a retry job (not implemented here) would poll for.
  */
+/**
+ * The money facts pushed to NearCart-Inventory alongside a SalesOrder (`payment` on the bridge
+ * payload). Inventory's own `SalesOrder.total` is goods value only, so this block is the ONLY way
+ * the shop (Partner app) and the driver learn what the customer actually owes — before it existed
+ * a 360 + 74 delivery fee COD order told the driver to collect 360, and an order's payment method
+ * never reached either app at all. Every amount is whole rupees straight off the `Order` row (its
+ * money columns are `Int` rupees, the same unit as the `items[].unitPrice` sent next to this), so
+ * the figures here are byte-identical to what the customer saw at checkout:
+ *   amountPayable (= Order.totalAmount)
+ *     = itemTotal + deliveryFee + weatherSurchargeFee + platformFee - discountTotal, floored at 0.
+ * `platformFee` has no line of its own in the contract, so it is folded into `deliveryFee` to keep
+ * that identity true for the shop's bill summary (it is always 0 today — see `createOrder`).
+ * Exported for tests.
+ */
+function buildInventoryPaymentPayload(
+  order: Pick<
+    OrderWithItems,
+    | 'paymentMethod'
+    | 'paymentStatus'
+    | 'subtotal'
+    | 'deliveryFee'
+    | 'weatherSurchargeFee'
+    | 'platformFee'
+    | 'discountAmount'
+    | 'couponCode'
+    | 'totalAmount'
+  >,
+  loyaltyDiscount?: number | null,
+): PushSalesOrderPayment {
+  return {
+    method: order.paymentMethod,
+    status: order.paymentStatus,
+    itemTotal: order.subtotal,
+    deliveryFee: order.deliveryFee + order.platformFee,
+    ...(order.weatherSurchargeFee > 0
+      ? { weatherSurchargeFee: order.weatherSurchargeFee }
+      : {}),
+    discountTotal: order.discountAmount,
+    ...(loyaltyDiscount && loyaltyDiscount > 0 ? { loyaltyDiscount } : {}),
+    ...(order.couponCode ? { couponCode: order.couponCode } : {}),
+    amountPayable: order.totalAmount,
+    currency: 'INR',
+  }
+}
+
 async function syncOrderToInventoryBridge(
   createdOrder: OrderWithItems,
   shop: Pick<Shop, 'inventoryOrganizationId' | 'inventoryBranchId'>,
@@ -550,6 +631,23 @@ async function syncOrderToInventoryBridge(
     // `getMappedPublicShop`) — but guarded defensively in case that
     // invariant ever changes.
     return createdOrder
+  }
+
+  // Loyalty-points portion of `Order.discountAmount` (there is no column for it — see
+  // `createOrder`), purely informational for the shop's bill summary. Looked up here rather than
+  // passed in so the retry sweep (`reconcileFailedInventorySyncs`), which only has the Order row,
+  // sends exactly the same payload as the checkout-time push. Never allowed to fail the push: the
+  // amount the driver collects (`amountPayable`) doesn't depend on it.
+  let loyaltyDiscount: number | null = null
+
+  try {
+    loyaltyDiscount =
+      (await getLoyaltyRedemptionForOrder(createdOrder.id))?.discountAmount ?? null
+  } catch (error) {
+    console.warn(
+      `[NearKart] Could not read the loyalty redemption for order ${createdOrder.orderNumber} — pushing its payment block without the loyalty breakdown`,
+      error,
+    )
   }
 
   try {
@@ -572,6 +670,7 @@ async function syncOrderToInventoryBridge(
         unitPrice: item.price,
       })),
       notes: createdOrder.notes ?? undefined,
+      payment: buildInventoryPaymentPayload(createdOrder, loyaltyDiscount),
     })
 
     return await prisma.order.update({
@@ -603,6 +702,170 @@ async function syncOrderToInventoryBridge(
       include: { items: true },
     })
   }
+}
+
+/**
+ * Periodic reconciliation for orders whose bridge sync previously failed and was never retried
+ * (see `syncOrderToInventoryBridge` above, and `cancelOrder`'s inventory-side cancel-push
+ * failure path below) — both intentionally never throw, so a flaky/unreachable Inventory backend
+ * can never break a customer's checkout or cancel, but that resilience used to come at the cost
+ * of silently orphaning the order forever: nothing ever revisited `inventorySyncStatus: 'FAILED'`.
+ * Concretely, without this:
+ *   - A checkout-time push failure meant no SalesOrder was ever created on the Inventory side, so
+ *     the shop's own confirmation-deadline auto-cancel sweep could never find it either (there's
+ *     no row for it to match) — the order would sit at PENDING_CONFIRMATION forever unless the
+ *     customer happened to notice and self-cancel.
+ *   - A cancel-time push failure meant the customer's order showed CANCELLED locally while the
+ *     shop's Inventory dashboard kept showing it as still open indefinitely.
+ * Exported as a plain function (mirroring NearCart-Inventory's order-confirmation-sweep pattern)
+ * so it can be invoked directly outside the schedule (manual runs, tests) as well as from the
+ * registered cron in jobs/inventory-sync-retry-sweep.ts.
+ */
+async function reconcileFailedInventorySyncs(): Promise<{
+  pushed: number
+  pushFailed: number
+  cancelled: number
+  cancelFailed: number
+}> {
+  let pushed = 0
+  let pushFailed = 0
+  let cancelled = 0
+  let cancelFailed = 0
+
+  // Case A: the initial checkout-time push never succeeded — no SalesOrder exists on the
+  // Inventory side yet. Scoped to `status: 'PENDING_CONFIRMATION'` specifically: if the customer
+  // has since cancelled locally (nothing else can move a never-synced order out of
+  // PENDING_CONFIRMATION), pushing it now would create a SalesOrder for an order the customer no
+  // longer wants — the cancel-retry branch below is what should run for that case instead.
+  let pendingPushRetries: Array<OrderWithItems & { shop: Shop | null }>
+
+  try {
+    pendingPushRetries = await prisma.order.findMany({
+      where: {
+        inventorySyncStatus: 'FAILED',
+        inventorySalesOrderId: null,
+        status: 'PENDING_CONFIRMATION',
+      },
+      include: { items: true, shop: true },
+    })
+  } catch (error) {
+    // A DB error here must never crash the process — this job runs unattended on a schedule,
+    // forever (same reasoning as NearCart-Inventory's order-confirmation-sweep).
+    console.warn(
+      '[NearKart] [inventory-sync-retry] Failed to query orders pending an initial-push retry — skipping this tick',
+      error,
+    )
+    pendingPushRetries = []
+  }
+
+  for (const order of pendingPushRetries) {
+    if (!order.shop) {
+      continue
+    }
+
+    try {
+      const result = await syncOrderToInventoryBridge(order, order.shop)
+
+      if (result.inventorySyncStatus === 'SYNCED') {
+        pushed += 1
+      } else {
+        pushFailed += 1
+      }
+    } catch (error) {
+      // syncOrderToInventoryBridge already catches its own failures internally and never throws
+      // — this is defense in depth only, matching the same posture as Inventory's sweep.
+      pushFailed += 1
+      console.warn(
+        `[NearKart] [inventory-sync-retry] Unexpected error retrying push for order ${order.orderNumber}`,
+        error,
+      )
+    }
+  }
+
+  // Case B: the order was cancelled locally, but the matching cancel on the Inventory-side
+  // SalesOrder failed and was never retried — the shop's dashboard is left showing a still-open
+  // order the customer believes (and NearCart shows) is cancelled.
+  let cancelRetries: Array<OrderWithItems & { shop: Shop | null }>
+
+  try {
+    cancelRetries = await prisma.order.findMany({
+      where: {
+        inventorySyncStatus: 'FAILED',
+        status: 'CANCELLED',
+        inventorySalesOrderId: { not: null },
+      },
+      include: { items: true, shop: true },
+    })
+  } catch (error) {
+    console.warn(
+      '[NearKart] [inventory-sync-retry] Failed to query orders pending a cancel retry — skipping this tick',
+      error,
+    )
+    cancelRetries = []
+  }
+
+  for (const order of cancelRetries) {
+    if (!order.shop?.inventoryOrganizationId) {
+      continue
+    }
+
+    try {
+      await cancelSalesOrderInInventory({
+        organizationId: order.shop.inventoryOrganizationId,
+        externalOrderId: order.id,
+      })
+
+      await prisma.order.update({
+        where: { id: order.id },
+        data: {
+          inventorySyncStatus: 'SYNCED',
+          inventorySyncError: null,
+          inventoryLastSyncedAt: new Date(),
+        },
+      })
+
+      cancelled += 1
+    } catch (error) {
+      // A 409 here (already terminal on the Inventory side — e.g. staff separately delivered it
+      // before the cancel landed) is a legitimate permanent desync, not a transient failure, but
+      // it will still be retried on the next tick regardless of cause. That's an acceptable
+      // tradeoff for a periodic best-effort reconciler with no retry-count/backoff state to
+      // persist (a schema change is deliberately avoided here — Prisma migrate/db push are known
+      // broken against this project's libsql:// connection) — the desync stays visible via
+      // `inventorySyncError` either way, for a human to investigate if it never clears.
+      const message = error instanceof Error ? error.message : 'Unknown error'
+
+      cancelFailed += 1
+
+      await prisma.order
+        .update({
+          where: { id: order.id },
+          data: {
+            inventorySyncError: `Cancel retry failed: ${message}`.slice(0, 500),
+            inventoryLastSyncedAt: new Date(),
+          },
+        })
+        .catch((updateError) => {
+          console.warn(
+            `[NearKart] [inventory-sync-retry] Failed to record cancel-retry failure for order ${order.orderNumber}`,
+            updateError,
+          )
+        })
+
+      console.warn(
+        `[NearKart] [inventory-sync-retry] Retry of inventory cancel failed for order ${order.orderNumber}`,
+        message,
+      )
+    }
+  }
+
+  if (pushed || pushFailed || cancelled || cancelFailed) {
+    console.log(
+      `[NearKart] [inventory-sync-retry] push: ${pushed} succeeded / ${pushFailed} still failing; cancel: ${cancelled} succeeded / ${cancelFailed} still failing.`,
+    )
+  }
+
+  return { pushed, pushFailed, cancelled, cancelFailed }
 }
 
 const TERMINAL_ORDER_STATUSES = new Set<OrderStatus>([
@@ -684,50 +947,104 @@ async function refreshOrderStatusFromInventory(
   try {
     const bridgeStatus = await getInventorySalesOrderStatus(order.id)
     const mappedStatus = mapInventorySalesOrderStatus(bridgeStatus.status)
+    const hasForwardStatusMove =
+      Boolean(mappedStatus) && isForwardOrderStatusTransition(order.status, mappedStatus!)
 
-    if (!mappedStatus || !isForwardOrderStatusTransition(order.status, mappedStatus)) {
+    const updateData: Prisma.OrderUpdateInput = {}
+
+    if (hasForwardStatusMove) {
+      updateData.status = mappedStatus!
+      updateData.inventorySyncStatus = 'SYNCED'
+      updateData.inventorySyncError = null
+      updateData.inventoryLastSyncedAt = new Date()
+
+      if (mappedStatus === 'ACCEPTED' && !order.acceptedAt) {
+        updateData.acceptedAt = bridgeStatus.confirmedAt
+          ? new Date(bridgeStatus.confirmedAt)
+          : new Date()
+      }
+
+      if (mappedStatus === 'DELIVERED' && !order.deliveredAt) {
+        updateData.deliveredAt = bridgeStatus.deliveredAt
+          ? new Date(bridgeStatus.deliveredAt)
+          : new Date()
+      }
+
+      // Delivery-proof photo, if the bridge response carries one — defensive read, since the
+      // sibling NearCart-Inventory repo's poll-status endpoint may not send this field yet (it's
+      // being added there separately). Only ever set when a value is actually present, so an
+      // older/not-yet-updated bridge response never overwrites an already-stored photo with
+      // nothing.
+      if (bridgeStatus.deliveryProofPhotoUrl) {
+        updateData.deliveryProofPhotoUrl = bridgeStatus.deliveryProofPhotoUrl
+      }
+
+      // Cash/pay-on-pickup orders are settled the moment the driver hands over the goods —
+      // there's no separate "mark paid" step anywhere in this codebase (confirmed by grep:
+      // nothing else ever writes PaymentStatus.PAID), so without this every COD order stays
+      // PENDING forever, even after delivery. ONLINE is deliberately left untouched: there's no
+      // payment-gateway integration here to confirm money actually moved, so PENDING is the
+      // honest state for it.
+      if (
+        mappedStatus === 'DELIVERED' &&
+        order.paymentStatus === 'PENDING' &&
+        (order.paymentMethod === 'COD' || order.paymentMethod === 'PAY_ON_PICKUP')
+      ) {
+        updateData.paymentStatus = 'PAID'
+      }
+    }
+
+    // Assigned-driver identity/contact — deliberately evaluated independently of
+    // `hasForwardStatusMove` above. Driver (re)assignment does not always coincide with a status
+    // change (e.g. a decline-and-reassign while the order stays READY), and this poll is the only
+    // fallback for driver info at all — the DRIVER_ASSIGNED/DRIVER_UNASSIGNED push webhook
+    // (`applyInventoryOrderEvent`) is fire-and-forget with no retry on the Inventory side, so a
+    // dropped webhook used to mean the customer's driver fields never updated (or never cleared)
+    // for the rest of that delivery, full stop — polling couldn't help because the field wasn't
+    // even in the response. `bridgeStatus.assignedDriver === undefined` means an older bridge
+    // deployment that doesn't select this relation yet — no signal either way, existing fields
+    // are left untouched.
+    if (bridgeStatus.assignedDriver !== undefined) {
+      if (bridgeStatus.assignedDriver) {
+        const driverInfoChanged =
+          order.driverName !== bridgeStatus.assignedDriver.fullName ||
+          order.driverPhone !== bridgeStatus.assignedDriver.phone ||
+          order.driverVehicleType !== bridgeStatus.assignedDriver.vehicleType
+
+        if (driverInfoChanged) {
+          updateData.driverName = bridgeStatus.assignedDriver.fullName
+          updateData.driverPhone = bridgeStatus.assignedDriver.phone
+          updateData.driverVehicleType = bridgeStatus.assignedDriver.vehicleType
+
+          if (!order.driverAssignedAt) {
+            updateData.driverAssignedAt = bridgeStatus.driverAssignedAt
+              ? new Date(bridgeStatus.driverAssignedAt)
+              : new Date()
+          }
+        }
+      } else if (order.driverName || order.driverPhone || order.driverVehicleType || order.driverAssignedAt) {
+        // The bridge explicitly reports no driver currently assigned (e.g. a decline with no
+        // immediate replacement) — clear stale identity/contact info rather than leaving the
+        // customer looking at a driver who is no longer delivering their order.
+        updateData.driverName = null
+        updateData.driverPhone = null
+        updateData.driverVehicleType = null
+        updateData.driverAssignedAt = null
+      }
+    }
+
+    if (Object.keys(updateData).length === 0) {
       return order
     }
 
-    const updateData: Prisma.OrderUpdateInput = {
-      status: mappedStatus,
-      inventorySyncStatus: 'SYNCED',
-      inventorySyncError: null,
-      inventoryLastSyncedAt: new Date(),
-    }
-
-    if (mappedStatus === 'ACCEPTED' && !order.acceptedAt) {
-      updateData.acceptedAt = bridgeStatus.confirmedAt
-        ? new Date(bridgeStatus.confirmedAt)
-        : new Date()
-    }
-
-    if (mappedStatus === 'DELIVERED' && !order.deliveredAt) {
-      updateData.deliveredAt = bridgeStatus.deliveredAt
-        ? new Date(bridgeStatus.deliveredAt)
-        : new Date()
-    }
-
-    // Delivery-proof photo, if the bridge response carries one — defensive read, since the
-    // sibling NearCart-Inventory repo's poll-status endpoint may not send this field yet (it's
-    // being added there separately). Only ever set when a value is actually present, so an
-    // older/not-yet-updated bridge response never overwrites an already-stored photo with
-    // nothing.
-    if (bridgeStatus.deliveryProofPhotoUrl) {
-      updateData.deliveryProofPhotoUrl = bridgeStatus.deliveryProofPhotoUrl
-    }
-
-    // Cash/pay-on-pickup orders are settled the moment the driver hands over the goods — there's
-    // no separate "mark paid" step anywhere in this codebase (confirmed by grep: nothing else
-    // ever writes PaymentStatus.PAID), so without this every COD order stays PENDING forever, even
-    // after delivery. ONLINE is deliberately left untouched: there's no payment-gateway
-    // integration here to confirm money actually moved, so PENDING is the honest state for it.
-    if (
-      mappedStatus === 'DELIVERED' &&
-      order.paymentStatus === 'PENDING' &&
-      (order.paymentMethod === 'COD' || order.paymentMethod === 'PAY_ON_PICKUP')
-    ) {
-      updateData.paymentStatus = 'PAID'
+    // A successful poll that only changed driver fields (no forward status move) still counts as
+    // a successful sync — record it the same way the status-move branch above does, so
+    // `inventoryLastSyncedAt`/`inventorySyncStatus` stay meaningful regardless of which fields
+    // actually changed.
+    if (!hasForwardStatusMove) {
+      updateData.inventorySyncStatus = 'SYNCED'
+      updateData.inventorySyncError = null
+      updateData.inventoryLastSyncedAt = new Date()
     }
 
     const updatedOrder = await prisma.order.update({
@@ -736,7 +1053,7 @@ async function refreshOrderStatusFromInventory(
       include: { items: true, shop: true, review: true },
     })
 
-    if (mappedStatus === 'DELIVERED') {
+    if (mappedStatus === 'DELIVERED' && hasForwardStatusMove) {
       await awardLoyaltyPointsForOrder(updatedOrder)
     }
 
@@ -850,8 +1167,9 @@ async function getOrderById(orderId: string, accessContext: OrderAccessContext) 
 
   const refreshedOrder = await refreshOrderStatusFromInventory(order)
   const tracking = await buildOrderTracking(refreshedOrder)
+  const loyaltyRedemption = await getLoyaltyRedemptionForOrder(refreshedOrder.id)
 
-  return { ...mapOrder(refreshedOrder), tracking }
+  return { ...mapOrder(refreshedOrder), tracking, loyaltyRedemption }
 }
 
 /**
@@ -888,7 +1206,16 @@ async function cancelOrder(orderId: string, accessContext: OrderAccessContext) {
 
   assertOrderAccessible(order, accessContext)
 
-  if (order.status !== 'PENDING_CONFIRMATION') {
+  // Reconcile against the Inventory-side SalesOrder before deciding whether this order is still
+  // cancellable. The local `status` column is only advanced by the (fire-and-forget, no-retry)
+  // reverse webhook or by a customer's own GET /orders/:orderId poll — without this, a customer
+  // could race a shop's just-issued confirm (webhook not yet landed / customer hasn't repolled)
+  // and force-cancel an order the shop already committed to and deducted stock for.
+  // `refreshOrderStatusFromInventory` never throws and only ever moves `status` forward, so this
+  // is safe to call unconditionally here.
+  const reconciledOrder = await refreshOrderStatusFromInventory(order)
+
+  if (reconciledOrder.status !== 'PENDING_CONFIRMATION') {
     // The old message hardcoded "it has already been accepted by the shop" for every non-
     // cancellable status, including CANCELLED/REJECTED/DELIVERED/OUT_FOR_DELIVERY — actively
     // misleading for e.g. a customer double-tapping cancel on an order that was already
@@ -910,34 +1237,34 @@ async function cancelOrder(orderId: string, accessContext: OrderAccessContext) {
     throw createHttpError(
       409,
       `Order can no longer be cancelled — ${
-        reason[order.status] ??
-        `it is already ${order.status.replace(/_/g, ' ').toLowerCase()}.`
+        reason[reconciledOrder.status] ??
+        `it is already ${reconciledOrder.status.replace(/_/g, ' ').toLowerCase()}.`
       }`,
     )
   }
 
-  const beforeSnapshot = { status: order.status }
+  const beforeSnapshot = { status: reconciledOrder.status }
 
   let finalOrder = await prisma.order.update({
-    where: { id: order.id },
+    where: { id: reconciledOrder.id },
     data: { status: 'CANCELLED' },
     include: { items: true, shop: true, review: true },
   })
 
   const shouldCancelInInventory =
-    order.inventorySyncStatus === 'SYNCED' &&
-    Boolean(order.inventorySalesOrderId) &&
-    Boolean(order.shop?.inventoryOrganizationId)
+    reconciledOrder.inventorySyncStatus === 'SYNCED' &&
+    Boolean(reconciledOrder.inventorySalesOrderId) &&
+    Boolean(reconciledOrder.shop?.inventoryOrganizationId)
 
   if (shouldCancelInInventory) {
     try {
       await cancelSalesOrderInInventory({
-        organizationId: order.shop!.inventoryOrganizationId!,
-        externalOrderId: order.id,
+        organizationId: reconciledOrder.shop!.inventoryOrganizationId!,
+        externalOrderId: reconciledOrder.id,
       })
 
       finalOrder = await prisma.order.update({
-        where: { id: order.id },
+        where: { id: reconciledOrder.id },
         data: {
           inventorySyncStatus: 'SYNCED',
           inventorySyncError: null,
@@ -949,12 +1276,12 @@ async function cancelOrder(orderId: string, accessContext: OrderAccessContext) {
       const message = error instanceof Error ? error.message : 'Unknown error'
 
       console.error(
-        `[NearKart] Order ${order.orderNumber} was cancelled locally, but cancelling the linked SalesOrder in the inventory bridge failed (now desynced — the shop's Inventory dashboard will not reflect this cancellation until reconciled):`,
+        `[NearKart] Order ${reconciledOrder.orderNumber} was cancelled locally, but cancelling the linked SalesOrder in the inventory bridge failed (now desynced — the shop's Inventory dashboard will not reflect this cancellation until reconciled):`,
         message,
       )
 
       finalOrder = await prisma.order.update({
-        where: { id: order.id },
+        where: { id: reconciledOrder.id },
         data: {
           inventorySyncStatus: 'FAILED',
           inventorySyncError: `Cancel was not reflected in inventory: ${message}`.slice(0, 500),
@@ -1157,4 +1484,11 @@ async function applyInventoryOrderEvent(input: InventoryOrderEventInput): Promis
   })
 }
 
-export { applyInventoryOrderEvent, cancelOrder, createOrder, getOrderById }
+export {
+  applyInventoryOrderEvent,
+  buildInventoryPaymentPayload,
+  cancelOrder,
+  createOrder,
+  getOrderById,
+  reconcileFailedInventorySyncs,
+}

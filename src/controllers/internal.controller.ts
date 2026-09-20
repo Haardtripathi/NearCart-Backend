@@ -1,7 +1,12 @@
 import type { NextFunction, Request, Response } from 'express'
 import { z } from 'zod'
 
+import {
+  listLinkedShopsTodayStatus,
+  updateLinkedShopsTodayStatus,
+} from '../services/internal-shop-status.service'
 import { applyInventoryOrderEvent } from '../services/orders.service'
+import { updateShopTodayStatusSchema } from '../validation/shop-owner.validation'
 
 const orderEventSchema = z.object({
   externalOrderId: z.string().trim().min(1),
@@ -46,4 +51,51 @@ async function receiveInventoryOrderEventHandler(
   }
 }
 
-export { receiveInventoryOrderEventHandler }
+// Shop "open today" confirmation, proxied by NearCart-Inventory on behalf of the Partner app —
+// see `internal-shop-status.service.ts`. The shop is addressed by the Inventory org/branch it's
+// linked to (`Shop.inventoryOrganizationId` / `inventoryBranchId`), never by NearCart shop id.
+const shopTodayStatusScopeSchema = z.object({
+  organizationId: z.string().trim().min(1),
+  branchId: z.string().trim().min(1).optional(),
+})
+
+// Same `isOpen` / `reason` rules as the shop owner's own endpoint — extended, not re-declared.
+const internalUpdateShopTodayStatusSchema = updateShopTodayStatusSchema.extend(
+  shopTodayStatusScopeSchema.shape,
+)
+
+async function listShopsTodayStatusHandler(
+  request: Request,
+  response: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const scope = shopTodayStatusScopeSchema.parse(request.query)
+    const result = await listLinkedShopsTodayStatus(scope)
+
+    response.status(200).json(result)
+  } catch (error) {
+    next(error)
+  }
+}
+
+async function updateShopsTodayStatusHandler(
+  request: Request,
+  response: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const payload = internalUpdateShopTodayStatusSchema.parse(request.body)
+    const result = await updateLinkedShopsTodayStatus(payload)
+
+    response.status(200).json(result)
+  } catch (error) {
+    next(error)
+  }
+}
+
+export {
+  listShopsTodayStatusHandler,
+  receiveInventoryOrderEventHandler,
+  updateShopsTodayStatusHandler,
+}
