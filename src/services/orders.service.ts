@@ -115,21 +115,28 @@ async function createOrderNumber(
   const datePrefix = placedAt.toISOString().slice(0, 10).replaceAll('-', '')
   const orderNumberPrefix = `NC-${datePrefix}-`
 
-  const todaysOrders = await transaction.order.findMany({
-    where: {
-      orderNumber: {
-        startsWith: orderNumberPrefix,
-      },
-    },
-    select: {
-      orderNumber: true,
-    },
-  })
+  // The MAX is computed in SQLite rather than by pulling every one of today's order numbers over
+  // the wire and reducing them in JS — checkout paid that transfer on every single order, so its
+  // cost grew with the day's own order count. The range predicate (rather than a LIKE) lets the
+  // unique index on `orderNumber` answer it as a bounded index scan.
+  //
+  // `CAST(... AS INTEGER)` keeps the original NUMERIC comparison, which a lexicographic MAX on
+  // the string would not: the suffix is zero-padded to 4 digits, so past 9999 orders in one day
+  // '10000' sorts BELOW '9999' as text and the sequence would silently restart into collisions.
+  // A non-numeric suffix casts to 0 in SQLite, matching the old reduce's "ignore anything
+  // unparseable, floor at 0" behaviour.
+  const suffixStartIndex = orderNumberPrefix.length + 1
+  // Highest code point, so the range covers every order number carrying today's prefix.
+  const upperBound = `${orderNumberPrefix}\uffff`
+  const rows = await transaction.$queryRaw<Array<{ maxSequence: number | bigint | null }>>`
+    SELECT MAX(CAST(SUBSTR("orderNumber", ${suffixStartIndex}) AS INTEGER)) AS "maxSequence"
+    FROM "Order"
+    WHERE "orderNumber" >= ${orderNumberPrefix} AND "orderNumber" < ${upperBound}
+  `
 
-  const highestSequence = todaysOrders.reduce((max, { orderNumber }) => {
-    const suffix = Number.parseInt(orderNumber.slice(orderNumberPrefix.length), 10)
-    return Number.isFinite(suffix) && suffix > max ? suffix : max
-  }, 0)
+  const rawMaxSequence = Number(rows[0]?.maxSequence ?? 0)
+  const highestSequence =
+    Number.isFinite(rawMaxSequence) && rawMaxSequence > 0 ? Math.trunc(rawMaxSequence) : 0
 
   return `${orderNumberPrefix}${String(highestSequence + 1).padStart(4, '0')}`
 }
@@ -1404,9 +1411,12 @@ const ORDER_EVENT_NOTIFICATION_COPY: Record<
     title: 'Your order needs your approval',
     body: 'The shop cannot supply everything you ordered — tap to review the updated order.',
   },
+  // NOT "confirmed": the customer's approval hands the revised order back to the shop, which
+  // still has to confirm it before anything is committed (a walk-in can take the stock while the
+  // customer is deciding). Telling them "confirmed" here would be a promise we cannot keep.
   PARTIAL_ACCEPTED: {
-    title: 'Order confirmed',
-    body: 'Thanks! The shop is preparing the items you approved.',
+    title: 'Sent to the shop',
+    body: "Thanks! We've sent your approval to the shop — you'll hear back once they confirm.",
   },
   PARTIAL_DECLINED: {
     title: 'Order cancelled',
@@ -1895,10 +1905,16 @@ async function respondToPartialFulfilment(
     return transaction.order.update({
       where: { id: order.id },
       data: {
-        // Same fields the CONFIRMED webhook path writes (see `applyInventoryOrderEvent`), since
-        // accepting a revised order IS the shop confirming it.
-        status: 'ACCEPTED',
-        acceptedAt: order.acceptedAt ?? new Date(),
+        // Status deliberately UNCHANGED (still PENDING_CONFIRMATION). This used to write
+        // ACCEPTED/`acceptedAt` on the theory that "accepting a revised order IS the shop
+        // confirming it" — that is no longer true. The customer's approval now hands the order
+        // back to the shop, which has to confirm it before any stock moves, because a walk-in can
+        // take the promised stock while the customer is deciding. The real ACCEPTED arrives on the
+        // CONFIRMED webhook (`applyInventoryOrderEvent`) once the shop commits.
+        //
+        // The line items and money below ARE applied now: they are exactly what the customer just
+        // agreed to, and showing them the list they approved is less confusing than showing the
+        // original. If the shop never confirms, the order is cancelled wholesale anyway.
         subtotal: newSubtotal,
         discountAmount: revised.discountAmount,
         couponCode: revised.couponCode,

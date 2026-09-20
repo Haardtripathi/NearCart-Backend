@@ -1,6 +1,6 @@
 import type { NextFunction, Request, Response } from 'express'
 
-import { autocompletePlaces, geocodeAddress, reverseGeocode } from '../services/maps.service'
+import { autocompletePlaces, geocodeAddress, geocodePlaceId, reverseGeocode } from '../services/maps.service'
 import { getTimestamp } from '../utils/time'
 import {
   autocompleteQuerySchema,
@@ -20,6 +20,9 @@ async function autocompleteHandler(
       sessionToken: query.sessionToken,
       language: query.language,
       regionBias: query.region,
+      latitude: query.lat,
+      longitude: query.lng,
+      radiusMeters: query.radiusMeters,
     })
 
     response.status(200).json({
@@ -38,7 +41,9 @@ async function geocodeHandler(
 ): Promise<void> {
   try {
     const query = geocodeQuerySchema.parse(request.query)
-    const result = await geocodeAddress(query.address)
+    const result = query.placeId
+      ? await geocodePlaceId(query.placeId)
+      : await geocodeAddress(query.address as string)
 
     response.status(200).json({
       ...result,

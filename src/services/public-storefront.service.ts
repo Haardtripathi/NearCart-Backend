@@ -1,6 +1,7 @@
-import type { Shop } from '@prisma/client'
+import { Prisma, type Shop } from '@prisma/client'
 
 import prisma from '../lib/prisma'
+import { getCachedJson, shopDirectoryCacheKey } from '../lib/cache'
 import { getDeliveryEtaMinutes } from './delivery-eta.service'
 import { getShopRatingSummary } from './order-review.service'
 import {
@@ -14,7 +15,12 @@ import {
 } from './inventory-client.service'
 import { getWeatherFeeForCondition, getWeatherImpact } from './weather.service'
 import { createHttpError } from '../utils/httpError'
-import { assertWithinServiceArea, computeDeliveryFee, haversineDistanceKm } from '../utils/geo'
+import {
+  assertWithinServiceArea,
+  buildBoundingBox,
+  computeDeliveryFee,
+  haversineDistanceKm,
+} from '../utils/geo'
 import { resolveBasketDeliveryAllocation } from './delivery-pricing.service'
 import type { BasketAllocation } from './delivery-pricing.service'
 import { assertShopIsOpenToday, getShopTodayStatus } from '../utils/shop-availability'
@@ -60,6 +66,58 @@ const SEARCH_PER_SHOP_RESULT_CAP = 8
 const TRENDING_FANOUT_SHOP_CAP = 10
 const TRENDING_PER_SHOP_RESULT_CAP = 6
 
+// Exactly the columns the public shop summary/list response is built from — `Shop` has ~35
+// columns and the list renders ~15 of them, and this query is the one that grows with the size
+// of the whole marketplace. `mapPublicShopSummary`, `getShopTodayStatus`, `isShopOpenNow` and
+// `attachLiveEta` between them define this set; the geo columns are read server-side for the
+// distance filter and then dropped from the response (see `mapPublicShopSummary`).
+const PUBLIC_SHOP_SUMMARY_SELECT = {
+  id: true,
+  name: true,
+  slug: true,
+  category: true,
+  description: true,
+  city: true,
+  area: true,
+  logoImageUrl: true,
+  estimatedDeliveryMinutes: true,
+  minimumOrderAmount: true,
+  deliveryFeeDefault: true,
+  deliveryEnabled: true,
+  openingTime: true,
+  closingTime: true,
+  isOpenToday: true,
+  todayStatusReason: true,
+  todayStatusUpdatedAt: true,
+  latitude: true,
+  longitude: true,
+  serviceRadiusKm: true,
+  inventoryOrganizationId: true,
+  inventoryBranchId: true,
+} satisfies Prisma.ShopSelect
+
+type PublicShopSummaryRow = Prisma.ShopGetPayload<{
+  select: typeof PUBLIC_SHOP_SUMMARY_SELECT
+}>
+
+type GeoScopedShop = Pick<Shop, 'latitude' | 'longitude' | 'serviceRadiusKm'>
+
+// The shop directory and the category counts derive entirely from `Shop` rows that change only
+// when an owner edits their shop or flips today's open/closed switch — not from anything
+// price- or stock-sensitive, which is always read live from the inventory bridge. 60s keeps a
+// closed-today flip visibly prompt even on an instance that didn't handle the write (the one
+// that did drops its cached entries immediately, see `bumpShopDirectoryGeneration`); the
+// category grid changes only when shops are added/approved, so it can afford longer.
+const SHOP_LIST_CACHE_TTL_SECONDS = 60
+const SHOP_CATEGORY_CACHE_TTL_SECONDS = 300
+const SHOP_MAX_RADIUS_CACHE_TTL_SECONDS = 300
+
+// Shop lists are paginated from here on. The default is generous enough that no realistic
+// "shops near me" render is truncated today, while capping what a single response can ever be
+// asked to serialize once the marketplace has thousands of shops per city.
+const SHOP_LIST_DEFAULT_LIMIT = 50
+const SHOP_LIST_MAX_LIMIT = 100
+
 function parseTimeToMinutes(value: string | null | undefined): number | null {
   if (!value) {
     return null
@@ -88,7 +146,7 @@ function parseTimeToMinutes(value: string | null | undefined): number | null {
   return hours * 60 + minutes
 }
 
-function isShopOpenNow(shop: Shop): boolean | null {
+function isShopOpenNow(shop: Pick<Shop, 'openingTime' | 'closingTime'>): boolean | null {
   const openingMinutes = parseTimeToMinutes(shop.openingTime)
   const closingMinutes = parseTimeToMinutes(shop.closingTime)
 
@@ -142,7 +200,7 @@ async function getMappedPublicShop(shopIdOrSlug: string) {
   return shop
 }
 
-function mapPublicShopSummary(shop: Shop) {
+function mapPublicShopSummary(shop: PublicShopSummaryRow) {
   const todayStatus = getShopTodayStatus(shop)
   // `isShopOpenNow` is a static opening/closing-time window check (Asia/Kolkata); `todayStatus`
   // is the shop owner's explicit daily confirmation. They're computed from different data and
@@ -212,7 +270,14 @@ function mapPublicShopDetail(shop: Shop) {
  * involved.
  */
 async function attachLiveEta<T extends Record<string, unknown>>(
-  shop: Shop,
+  shop: Pick<
+    Shop,
+    | 'latitude'
+    | 'longitude'
+    | 'estimatedDeliveryMinutes'
+    | 'inventoryOrganizationId'
+    | 'inventoryBranchId'
+  >,
   mapped: T,
   customerCoordinates: CustomerCoordinates | null | undefined,
   mode: 'fast' | 'full',
@@ -241,7 +306,7 @@ async function attachLiveEta<T extends Record<string, unknown>>(
  * shop list card isn't where a rating needs to show today.
  */
 async function attachRatingSummary<T extends Record<string, unknown>>(
-  shop: Shop,
+  shop: Pick<Shop, 'id'>,
   mapped: T,
 ): Promise<T & { averageRating: number | null; reviewCount: number }> {
   const rating = await getShopRatingSummary(shop.id)
@@ -494,28 +559,137 @@ async function buildValidatedCartSnapshot(
   }
 }
 
-async function listPublicShops(
-  customerCoordinates?: CustomerCoordinates | null,
-  filters?: { search?: string | null; category?: string | null; city?: string | null },
-) {
-  const shops = await prisma.shop.findMany({
-    where: {
-      ...PUBLIC_MAPPED_SHOP_WHERE,
-      // Plain `contains`, deliberately no `mode: 'insensitive'` — this schema's datasource is
-      // sqlite (see prisma/schema.prisma), which throws a PrismaClientValidationError on that
-      // filter (postgres/mysql-only). SQLite's LIKE is already ASCII-case-insensitive, which
-      // covers the realistic case of English shop names without it.
-      ...(filters?.search ? { name: { contains: filters.search } } : {}),
-      ...(filters?.category ? { category: filters.category } : {}),
-      // `contains`, not exact equality — `Shop.city` is free text (see public.validation.ts's
-      // `city` param docs), and SQLite's LIKE (which `contains` compiles to) is ASCII
-      // case-insensitive, same reasoning as the `name`/search filter above. Exact equality here
-      // previously meant a customer typing "mumbai" against a DB value of "Mumbai" silently got
-      // zero shops back instead of a case-normalized match.
-      ...(filters?.city ? { city: { contains: filters.city } } : {}),
+/**
+ * Widest service radius any publicly listed shop has configured, used to size the SQL bounding
+ * box below. One aggregate over `Shop`, cached — it changes only when a shop owner edits their
+ * radius, and re-running it on every shop-list request would cost exactly the round trip the
+ * bounding box is there to save.
+ */
+async function getWidestServiceRadiusKm(): Promise<number> {
+  return getCachedJson(
+    shopDirectoryCacheKey('public-shop-widest-radius', null),
+    SHOP_MAX_RADIUS_CACHE_TTL_SECONDS,
+    async () => {
+      const aggregate = await prisma.shop.aggregate({
+        where: PUBLIC_MAPPED_SHOP_WHERE,
+        _max: { serviceRadiusKm: true },
+      })
+
+      return Math.max(DEFAULT_SHOP_MATCH_RADIUS_KM, aggregate._max.serviceRadiusKm ?? 0)
     },
-    orderBy: [{ createdAt: 'desc' }, { name: 'asc' }],
-  })
+  )
+}
+
+function buildBoundingBoxWhere(
+  customerCoordinates: CustomerCoordinates,
+  radiusKm: number,
+): Prisma.ShopWhereInput {
+  const box = buildBoundingBox(
+    customerCoordinates.latitude,
+    customerCoordinates.longitude,
+    radiusKm,
+  )
+
+  return {
+    // A range predicate on a nullable column already excludes nulls, which matches the exact
+    // filter's "a shop with no coordinates can't have its distance computed" rule.
+    latitude: { gte: box.minLatitude, lte: box.maxLatitude },
+    ...(box.minLongitude != null && box.maxLongitude != null
+      ? { longitude: { gte: box.minLongitude, lte: box.maxLongitude } }
+      : { longitude: { not: null } }),
+  }
+}
+
+/**
+ * SQL pre-filter for "shops that could possibly serve this customer", so the database returns a
+ * neighbourhood rather than the whole country for the exact haversine pass to whittle down. It
+ * is a strict superset of what `filterShopsInServiceRange` keeps, so results are identical:
+ *
+ *  - a shop whose radius is the default or smaller can only qualify within the default-radius
+ *    box, which is the tight, common case;
+ *  - a shop that has explicitly configured a wider radius is additionally admitted from a box
+ *    sized to the widest radius in use.
+ *
+ * Splitting it that way matters because one shop configuring a 500km radius would otherwise
+ * force every customer's pre-filter out to 500km and make it useless.
+ */
+async function buildServiceRangePrefilter(
+  customerCoordinates: CustomerCoordinates,
+): Promise<Prisma.ShopWhereInput> {
+  const widestRadiusKm = await getWidestServiceRadiusKm()
+  const nearBox = buildBoundingBoxWhere(customerCoordinates, DEFAULT_SHOP_MATCH_RADIUS_KM)
+
+  if (widestRadiusKm <= DEFAULT_SHOP_MATCH_RADIUS_KM) {
+    return nearBox
+  }
+
+  return {
+    OR: [
+      nearBox,
+      {
+        AND: [
+          { serviceRadiusKm: { gt: DEFAULT_SHOP_MATCH_RADIUS_KM } },
+          buildBoundingBoxWhere(customerCoordinates, widestRadiusKm),
+        ],
+      },
+    ],
+  }
+}
+
+interface ShopListPagination {
+  page?: number | null
+  limit?: number | null
+}
+
+function resolveShopListPagination(pagination?: ShopListPagination | null): {
+  page: number
+  limit: number
+} {
+  const limit = Math.min(
+    Math.max(pagination?.limit ?? SHOP_LIST_DEFAULT_LIMIT, 1),
+    SHOP_LIST_MAX_LIMIT,
+  )
+
+  return { page: Math.max(pagination?.page ?? 1, 1), limit }
+}
+
+async function computePublicShops(
+  customerCoordinates: CustomerCoordinates | null | undefined,
+  filters: { search?: string | null; category?: string | null; city?: string | null } | undefined,
+  pagination: { page: number; limit: number },
+) {
+  const where: Prisma.ShopWhereInput = {
+    ...PUBLIC_MAPPED_SHOP_WHERE,
+    ...(customerCoordinates ? await buildServiceRangePrefilter(customerCoordinates) : {}),
+    // Plain `contains`, deliberately no `mode: 'insensitive'` — this schema's datasource is
+    // sqlite (see prisma/schema.prisma), which throws a PrismaClientValidationError on that
+    // filter (postgres/mysql-only). SQLite's LIKE is already ASCII-case-insensitive, which
+    // covers the realistic case of English shop names without it.
+    ...(filters?.search ? { name: { contains: filters.search } } : {}),
+    ...(filters?.category ? { category: filters.category } : {}),
+    // `contains`, not exact equality — `Shop.city` is free text (see public.validation.ts's
+    // `city` param docs), and SQLite's LIKE (which `contains` compiles to) is ASCII
+    // case-insensitive, same reasoning as the `name`/search filter above. Exact equality here
+    // previously meant a customer typing "mumbai" against a DB value of "Mumbai" silently got
+    // zero shops back instead of a case-normalized match.
+    ...(filters?.city ? { city: { contains: filters.city } } : {}),
+  }
+
+  // Without coordinates there is nothing to scope the directory by, so this is the one path that
+  // could otherwise read every shop in the marketplace — it paginates in SQL. The geo path is
+  // bounded by the bounding box instead: it has to see every candidate before it can sort by
+  // distance, so capping it in SQL would bias which shops count as "nearest".
+  const [shops, unscopedTotal] = await Promise.all([
+    prisma.shop.findMany({
+      select: PUBLIC_SHOP_SUMMARY_SELECT,
+      where,
+      orderBy: [{ createdAt: 'desc' }, { name: 'asc' }],
+      ...(customerCoordinates
+        ? {}
+        : { skip: (pagination.page - 1) * pagination.limit, take: pagination.limit }),
+    }),
+    customerCoordinates ? Promise.resolve(0) : prisma.shop.count({ where }),
+  ])
 
   // Hyperlocal filtering: only applied when the customer's coordinates are known. Each shop
   // is only "near" if it's within its own `serviceRadiusKm` (shop-owner-configured), falling
@@ -525,10 +699,11 @@ async function listPublicShops(
   // which just skips the travel-time component instead of erroring. When no customer
   // coordinates are supplied, behavior is unchanged from before: no filter, no sort, no
   // `distanceKm` field.
-  let scopedShops: Array<{ shop: Shop; distanceKm: number | null }>
+  let scopedShops: Array<{ shop: PublicShopSummaryRow; distanceKm: number | null }>
+  let matchedTotal: number
 
   if (customerCoordinates) {
-    scopedShops = shops
+    const ranked = shops
       .filter((shop) => shop.latitude != null && shop.longitude != null)
       .map((shop) => ({
         shop,
@@ -544,8 +719,15 @@ async function listPublicShops(
           distanceKm <= (shop.serviceRadiusKm ?? DEFAULT_SHOP_MATCH_RADIUS_KM),
       )
       .sort((a, b) => a.distanceKm - b.distanceKm)
+
+    matchedTotal = ranked.length
+    scopedShops = ranked.slice(
+      (pagination.page - 1) * pagination.limit,
+      pagination.page * pagination.limit,
+    )
   } else {
     scopedShops = shops.map((shop) => ({ shop, distanceKm: null }))
+    matchedTotal = unscopedTotal
   }
 
   const items = await Promise.all(
@@ -566,20 +748,63 @@ async function listPublicShops(
   return {
     items,
     meta: {
+      // Unchanged meaning for existing callers: how many shops this response carries. `matched`
+      // is the new field that knows about the ones beyond this page.
       total: items.length,
+      matched: matchedTotal,
+      page: pagination.page,
+      limit: pagination.limit,
+      hasMore: pagination.page * pagination.limit < matchedTotal,
     },
   }
+}
+
+/**
+ * Cached for `SHOP_LIST_CACHE_TTL_SECONDS`. Coordinates are rounded into the cache key so
+ * customers in the same ~110m block share an entry (the same trick the trending cache uses);
+ * distances are still computed from the caller's exact coordinates on a miss. Nothing
+ * stock- or price-sensitive is cached here — the shop directory is `Shop` rows only.
+ */
+async function listPublicShops(
+  customerCoordinates?: CustomerCoordinates | null,
+  filters?: { search?: string | null; category?: string | null; city?: string | null },
+  pagination?: ShopListPagination | null,
+) {
+  const resolvedPagination = resolveShopListPagination(pagination)
+  const cacheKey = shopDirectoryCacheKey('public-shops', [
+    customerCoordinates
+      ? [customerCoordinates.latitude.toFixed(3), customerCoordinates.longitude.toFixed(3)]
+      : null,
+    filters?.search ?? null,
+    filters?.category ?? null,
+    filters?.city ?? null,
+    resolvedPagination.page,
+    resolvedPagination.limit,
+  ])
+
+  return getCachedJson(cacheKey, SHOP_LIST_CACHE_TTL_SECONDS, () =>
+    computePublicShops(customerCoordinates, filters, resolvedPagination),
+  )
 }
 
 // Cheap local aggregation over the flat Shop.category string (shop-type: "Grocery",
 // "Pharmacy", ...) — deliberately NOT the deeper per-shop product-category system from the
 // inventory bridge (that stays scoped to listPublicShopCatalog's `filters.categories`, unchanged).
 // Powers a home-page "browse by shop type" strip, Swiggy/Blinkit-style.
-async function listPublicShopCategories(customerCoordinates?: CustomerCoordinates | null) {
+async function computePublicShopCategories(
+  customerCoordinates: CustomerCoordinates | null | undefined,
+) {
   // Coordinates known: only count shops that can actually deliver there, so the home category
   // grid never leads to an empty "No shops found" screen (same rule as listPublicShops).
   if (customerCoordinates) {
-    const shops = await prisma.shop.findMany({ where: PUBLIC_MAPPED_SHOP_WHERE })
+    const shops = await prisma.shop.findMany({
+      // Counting categories needs four columns, not whole shop rows.
+      select: { category: true, latitude: true, longitude: true, serviceRadiusKm: true },
+      where: {
+        ...PUBLIC_MAPPED_SHOP_WHERE,
+        ...(await buildServiceRangePrefilter(customerCoordinates)),
+      },
+    })
     const counts = new Map<string, number>()
     for (const shop of filterShopsInServiceRange(shops, customerCoordinates)) {
       counts.set(shop.category, (counts.get(shop.category) ?? 0) + 1)
@@ -607,10 +832,25 @@ async function listPublicShopCategories(customerCoordinates?: CustomerCoordinate
   }
 }
 
+async function listPublicShopCategories(customerCoordinates?: CustomerCoordinates | null) {
+  const cacheKey = shopDirectoryCacheKey('public-shop-categories', [
+    customerCoordinates
+      ? [customerCoordinates.latitude.toFixed(3), customerCoordinates.longitude.toFixed(3)]
+      : null,
+  ])
+
+  return getCachedJson(cacheKey, SHOP_CATEGORY_CACHE_TTL_SECONDS, () =>
+    computePublicShopCategories(customerCoordinates),
+  )
+}
+
 // Same hyperlocal rule as listPublicShops: a shop is "near" only if the customer is inside the
 // shop's own `serviceRadiusKm` (falling back to DEFAULT_SHOP_MATCH_RADIUS_KM), and a shop with no
 // coordinates of its own is excluded rather than guessed at. Nearest first.
-function filterShopsInServiceRange(shops: Shop[], customerCoordinates: CustomerCoordinates): Shop[] {
+function filterShopsInServiceRange<T extends GeoScopedShop>(
+  shops: T[],
+  customerCoordinates: CustomerCoordinates,
+): T[] {
   return shops
     .filter((shop) => shop.latitude != null && shop.longitude != null)
     .map((shop) => ({

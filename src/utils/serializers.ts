@@ -257,7 +257,25 @@ function mapOrder(order: OrderSource) {
   }
 }
 
-function mapOrderPreview(order: Order) {
+// Narrow input, not the whole `Order` row — list endpoints `select` exactly these columns rather
+// than reading every column of every order (see `ORDER_PREVIEW_SELECT` in customer.service.ts).
+type OrderPreviewSource = Pick<
+  Order,
+  | 'id'
+  | 'orderNumber'
+  | 'customerUserId'
+  | 'shopId'
+  | 'shopName'
+  | 'status'
+  | 'paymentStatus'
+  | 'paymentMethod'
+  | 'totalAmount'
+  | 'customerName'
+  | 'placedAt'
+  | 'deliveredAt'
+>
+
+function mapOrderPreview(order: OrderPreviewSource) {
   return {
     id: order.id,
     orderNumber: order.orderNumber,

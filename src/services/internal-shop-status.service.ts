@@ -12,6 +12,7 @@
 import type { Prisma, Shop } from '@prisma/client'
 
 import prisma from '../lib/prisma'
+import { bumpShopDirectoryGeneration } from '../lib/cache'
 import { createHttpError } from '../utils/httpError'
 import { getShopTodayStatus } from '../utils/shop-availability'
 import { buildShopTodayStatusData } from './shop-owner.service'
@@ -84,6 +85,9 @@ async function updateLinkedShopsTodayStatus(payload: InternalUpdateShopTodayStat
     where: { id: { in: shopIds } },
     data: buildShopTodayStatusData(payload),
   })
+
+  // Same reason as the shop owner's own switch: today's flag is on every public shop card.
+  bumpShopDirectoryGeneration()
 
   const updatedShops = await prisma.shop.findMany({
     where: { id: { in: shopIds } },

@@ -13,14 +13,16 @@ import {
   updateShopApprovalSchema,
   updateShopStorefrontSchema,
 } from '../validation/admin.validation'
+import { paginationQuerySchema } from '../validation/pagination.validation'
 
 async function listUsersHandler(
-  _request: Request,
+  request: Request,
   response: Response,
   next: NextFunction,
 ): Promise<void> {
   try {
-    const result = await listUsers()
+    const pagination = paginationQuerySchema.parse(request.query)
+    const result = await listUsers(pagination)
 
     response.status(200).json(result)
   } catch (error) {
@@ -29,12 +31,13 @@ async function listUsersHandler(
 }
 
 async function listPendingShopApprovalsHandler(
-  _request: Request,
+  request: Request,
   response: Response,
   next: NextFunction,
 ): Promise<void> {
   try {
-    const result = await listPendingShopApprovals()
+    const pagination = paginationQuerySchema.parse(request.query)
+    const result = await listPendingShopApprovals(pagination)
 
     response.status(200).json(result)
   } catch (error) {
@@ -61,12 +64,13 @@ async function updateShopApprovalHandler(
 }
 
 async function listShopsHandler(
-  _request: Request,
+  request: Request,
   response: Response,
   next: NextFunction,
 ): Promise<void> {
   try {
-    const result = await listShops()
+    const pagination = paginationQuerySchema.parse(request.query)
+    const result = await listShops(pagination)
 
     response.status(200).json(result)
   } catch (error) {
@@ -109,12 +113,13 @@ async function updateShopStorefrontHandler(
 }
 
 async function listOrdersHandler(
-  _request: Request,
+  request: Request,
   response: Response,
   next: NextFunction,
 ): Promise<void> {
   try {
-    const result = await listOrders()
+    const pagination = paginationQuerySchema.parse(request.query)
+    const result = await listOrders(pagination)
 
     response.status(200).json(result)
   } catch (error) {

@@ -37,6 +37,70 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max)
 }
 
+interface BoundingBox {
+  minLatitude: number
+  maxLatitude: number
+  // Null when the box would span (or wrap past) the whole longitude range — because the circle
+  // reaches a pole, or crosses the ±180° antimeridian, neither of which a single `BETWEEN` can
+  // express. Callers then filter on latitude alone and let the exact haversine pass do the rest.
+  minLongitude: number | null
+  maxLongitude: number | null
+}
+
+function toDegrees(radians: number): number {
+  return (radians * 180) / Math.PI
+}
+
+// Absorbs floating-point differences between this box and `haversineDistanceKm`'s own
+// arithmetic. ~1e-7 degrees is about a centimetre — far below any real coordinate's precision,
+// and it only ever widens the box.
+const BOUNDING_BOX_EPSILON_DEGREES = 1e-7
+
+/**
+ * Bounding box around a point, used as a cheap SQL pre-filter before the exact haversine
+ * distance test runs in JS.
+ *
+ * It is a strict SUPERSET of the circle of the given radius, so pre-filtering on it can never
+ * drop a row the exact test would have kept — which is the only property that makes it safe to
+ * apply to a customer-visible shop list. That is why the longitude half-width is the exact
+ * spherical bound `asin(sin δ / cos φ)` rather than the usual flat-earth `δ / cos φ`: the two
+ * agree to a rounding error at Indian latitudes but the approximation is genuinely too narrow
+ * further from the equator, which would silently hide shops. The same `EARTH_RADIUS_KM` as
+ * `haversineDistanceKm` is used, so the two agree on what "radiusKm" means.
+ *
+ * The box still admits points up to ~41% farther away in its corners; the exact test discards
+ * those.
+ */
+function buildBoundingBox(
+  latitude: number,
+  longitude: number,
+  radiusKm: number,
+): BoundingBox {
+  const angularRadius = radiusKm / EARTH_RADIUS_KM
+  const latitudeDelta = toDegrees(angularRadius) + BOUNDING_BOX_EPSILON_DEGREES
+  const minLatitude = latitude - latitudeDelta
+  const maxLatitude = latitude + latitudeDelta
+
+  // A circle that reaches over a pole covers every longitude, and so does one whose half-width
+  // is undefined because `sin δ / cos φ` exceeds 1.
+  const latitudeCosine = Math.cos(toRadians(latitude))
+  const sineRatio = latitudeCosine > 0 ? Math.sin(angularRadius) / latitudeCosine : 2
+
+  if (minLatitude <= -90 || maxLatitude >= 90 || !(sineRatio < 1)) {
+    return { minLatitude, maxLatitude, minLongitude: null, maxLongitude: null }
+  }
+
+  const longitudeDelta = toDegrees(Math.asin(sineRatio)) + BOUNDING_BOX_EPSILON_DEGREES
+  const minLongitude = longitude - longitudeDelta
+  const maxLongitude = longitude + longitudeDelta
+
+  if (minLongitude < -180 || maxLongitude > 180) {
+    return { minLatitude, maxLatitude, minLongitude: null, maxLongitude: null }
+  }
+
+  return { minLatitude, maxLatitude, minLongitude, maxLongitude }
+}
+
 /**
  * Distance-based delivery fee: `baseFee + perKmRate * distanceKm`, clamped to
  * [minFee, maxFee] and rounded to the nearest rupee (money in this schema is `Int`).
@@ -106,4 +170,5 @@ function assertWithinServiceArea(
   }
 }
 
-export { assertWithinServiceArea, computeDeliveryFee, haversineDistanceKm }
+export { assertWithinServiceArea, buildBoundingBox, computeDeliveryFee, haversineDistanceKm }
+export type { BoundingBox }

@@ -1,6 +1,11 @@
 import { Prisma } from '@prisma/client'
 
 import prisma from '../lib/prisma'
+import {
+  bumpShopDirectoryGeneration,
+  getCachedJson,
+  shopDirectoryCacheKey,
+} from '../lib/cache'
 import { writeAuditLog } from './audit.service'
 import { createHttpError } from '../utils/httpError'
 import { normalizeOptionalString } from '../utils/user'
@@ -159,6 +164,9 @@ async function createOrderReview(
     throw error
   }
 
+  // This shop's cached rating aggregate is now wrong.
+  bumpShopDirectoryGeneration()
+
   await writeAuditLog({
     actorId: options.customerUserId,
     actorType: 'CUSTOMER',
@@ -214,25 +222,72 @@ async function listShopReviews(shopId: string, query: ShopReviewsQueryInput) {
   }
 }
 
+interface ShopRatingSummary {
+  averageRating: number | null
+  reviewCount: number
+}
+
+// A shop's average moves only when someone reviews it, and reviews are rare writes against a
+// slowly growing table — so this is cached rather than re-aggregated on every shop-detail,
+// catalog and product-detail render. `createOrderReview` drops the cached entry, so the
+// instance that took the review is immediately consistent.
+const SHOP_RATING_CACHE_TTL_SECONDS = 300
+
 /**
  * Shared by `getPublicShop`/`listPublicShopCatalog`/`getPublicCatalogProduct`
  * (public-storefront.service.ts) to attach the average-rating + review-count
- * pair onto a shop detail response. A simple grouped `_avg`/`_count`
- * aggregate — no caching, no materialized column — is plenty at this scale;
- * revisit only if a shop-detail page load is ever shown to be aggregate-
- * query-bound in practice.
+ * pair onto a shop detail response.
  */
-async function getShopRatingSummary(shopRecordId: string) {
-  const aggregate = await prisma.orderReview.aggregate({
-    where: { shopId: shopRecordId },
+async function getShopRatingSummary(shopRecordId: string): Promise<ShopRatingSummary> {
+  return getCachedJson(
+    shopDirectoryCacheKey('shop-rating', shopRecordId),
+    SHOP_RATING_CACHE_TTL_SECONDS,
+    async () => {
+      const aggregate = await prisma.orderReview.aggregate({
+        where: { shopId: shopRecordId },
+        _avg: { rating: true },
+        _count: { rating: true },
+      })
+
+      return {
+        averageRating: aggregate._avg.rating ?? null,
+        reviewCount: aggregate._count.rating,
+      }
+    },
+  )
+}
+
+/**
+ * The same aggregate for many shops at once, in ONE grouped query instead of one per shop —
+ * what a list of shop cards (favourites) needs. Shops with no reviews yet are simply absent from
+ * the grouped result, so callers fall back to the empty summary rather than expecting a row.
+ */
+async function getShopRatingSummaries(
+  shopRecordIds: string[],
+): Promise<Map<string, ShopRatingSummary>> {
+  const summaries = new Map<string, ShopRatingSummary>()
+  const uniqueIds = [...new Set(shopRecordIds)]
+
+  if (uniqueIds.length === 0) {
+    return summaries
+  }
+
+  const grouped = await prisma.orderReview.groupBy({
+    by: ['shopId'],
+    where: { shopId: { in: uniqueIds } },
     _avg: { rating: true },
     _count: { rating: true },
   })
 
-  return {
-    averageRating: aggregate._avg.rating ?? null,
-    reviewCount: aggregate._count.rating,
+  for (const row of grouped) {
+    summaries.set(row.shopId, {
+      averageRating: row._avg.rating ?? null,
+      reviewCount: row._count.rating,
+    })
   }
+
+  return summaries
 }
 
-export { createOrderReview, getShopRatingSummary, listShopReviews }
+export { createOrderReview, getShopRatingSummaries, getShopRatingSummary, listShopReviews }
+export type { ShopRatingSummary }

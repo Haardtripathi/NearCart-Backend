@@ -1,6 +1,7 @@
 import type { Prisma } from '@prisma/client'
 
 import prisma from '../lib/prisma'
+import { bumpShopDirectoryGeneration } from '../lib/cache'
 import { buildMeta } from '../utils/response'
 import {
   mapSafeUser,
@@ -218,6 +219,8 @@ async function createShop(userId: string, payload: CreateShopInput) {
     },
   })
 
+  bumpShopDirectoryGeneration()
+
   return {
     item: mapShop(shop),
     meta: buildMeta(),
@@ -352,6 +355,8 @@ async function updateShop(
     },
   })
 
+  bumpShopDirectoryGeneration()
+
   return {
     item: mapShop(shop),
     meta: buildMeta(),
@@ -402,6 +407,10 @@ async function updateShopTodayStatus(
     },
     data: buildShopTodayStatusData(payload),
   })
+
+  // Today's open/closed flag is part of every public shop card, so the cached directory is stale
+  // the moment it changes.
+  bumpShopDirectoryGeneration()
 
   // Deliberately flat (not this file's usual `{ item, meta }` wrapping) — matches the exact
   // contract the frontend was built against: `{ todayStatus, todayStatusReason,

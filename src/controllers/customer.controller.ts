@@ -23,6 +23,7 @@ import {
   updateAddressSchema,
   updateCustomerProfileSchema,
 } from '../validation/customer.validation'
+import { paginationQuerySchema } from '../validation/pagination.validation'
 
 async function getCustomerProfileHandler(
   request: Request,
@@ -124,7 +125,8 @@ async function listCustomerOrdersHandler(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const result = await listCustomerOrders(request.auth!.userId)
+    const pagination = paginationQuerySchema.parse(request.query)
+    const result = await listCustomerOrders(request.auth!.userId, pagination)
 
     response.status(200).json(result)
   } catch (error) {

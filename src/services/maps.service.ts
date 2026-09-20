@@ -4,6 +4,13 @@ import { createHttpError } from '../utils/httpError'
 const GOOGLE_MAPS_BASE_URL = 'https://maps.googleapis.com/maps/api'
 const GOOGLE_PLACES_BASE_URL = 'https://places.googleapis.com/v1'
 
+/** Every shop, customer and driver on the platform is in India; an unbiased global autocomplete
+ *  is what made address search return the wrong city. Clients can still override per request. */
+const DEFAULT_REGION_CODE = 'in'
+/** ~50 km — a soft bias, not a hard filter: results outside it still appear, just ranked lower,
+ *  so someone adding an address for another city can still find it. */
+const DEFAULT_BIAS_RADIUS_METERS = 50_000
+
 interface GoogleAddressComponent {
   long_name: string
   short_name: string
@@ -138,18 +145,43 @@ function findComponent(
     ?.long_name ?? null
 }
 
+function findComponentShort(
+  components: GoogleAddressComponent[],
+  type: string,
+): string | null {
+  return components.find((component) => component.types.includes(type))
+    ?.short_name ?? null
+}
+
 function extractComponents(components: GoogleAddressComponent[]) {
+  const subpremise = findComponent(components, 'subpremise')
+  const premise = findComponent(components, 'premise')
+  const streetNumber = findComponent(components, 'street_number')
+  const route = findComponent(components, 'route')
+  const street = [streetNumber, route].filter(Boolean).join(' ') || null
+
   return {
     city:
       findComponent(components, 'locality') ??
+      findComponent(components, 'administrative_area_level_3') ??
       findComponent(components, 'administrative_area_level_2'),
     area:
-      findComponent(components, 'sublocality') ??
       findComponent(components, 'sublocality_level_1') ??
+      findComponent(components, 'sublocality') ??
       findComponent(components, 'neighborhood'),
     pincode: findComponent(components, 'postal_code'),
     state: findComponent(components, 'administrative_area_level_1'),
     country: findComponent(components, 'country'),
+    // Short forms so a client can prefill a country/state picker keyed on ISO codes (the mobile
+    // address form stores "IN"/"GJ", not display names) without re-deriving them from the label.
+    stateCode: findComponentShort(components, 'administrative_area_level_1'),
+    countryCode: findComponentShort(components, 'country'),
+    // Just the door/street part. `formattedAddress` is the whole postal string ("B-12, Akhbarnagar
+    // Society, Naranpura, Ahmedabad, Gujarat 380013, India"), and clients that prefilled their
+    // "Address line 1" field from it ended up repeating the area, city, state and pincode that
+    // already have their own fields directly underneath.
+    streetAddress:
+      [subpremise, premise, street].filter(Boolean).join(', ') || null,
   }
 }
 
@@ -173,14 +205,38 @@ async function autocompletePlaces(input: {
   sessionToken?: string
   language?: string
   regionBias?: string
+  latitude?: number
+  longitude?: number
+  radiusMeters?: number
 }) {
+  const hasOrigin = input.latitude !== undefined && input.longitude !== undefined
+
   const payload = await callGooglePlaces<GooglePlacesAutocompleteResponse>(
     '/places:autocomplete',
     {
       input: input.query,
       sessionToken: input.sessionToken,
       languageCode: input.language,
-      includedRegionCodes: input.regionBias ? [input.regionBias] : undefined,
+      // BUG FIX (reported on-device 2026-09-20: "searching and getting wrong location"): this
+      // used to send the raw query and nothing else. Places Autocomplete with no bias ranks
+      // globally, so an Indian locality name that also exists elsewhere — or a short/ambiguous
+      // one like "Nigam Nagar" — came back pointing at a different city or country entirely.
+      // Two corrections: default the region to India instead of leaving it unset, and bias
+      // toward wherever the customer actually is when the client tells us.
+      includedRegionCodes: [input.regionBias ?? DEFAULT_REGION_CODE],
+      locationBias: hasOrigin
+        ? {
+            circle: {
+              center: { latitude: input.latitude, longitude: input.longitude },
+              radius: input.radiusMeters ?? DEFAULT_BIAS_RADIUS_METERS,
+            },
+          }
+        : undefined,
+      // Sorts the suggestions by real distance from the customer, so the nearest match of an
+      // ambiguous name is first rather than whichever Google considers globally most prominent.
+      origin: hasOrigin
+        ? { latitude: input.latitude, longitude: input.longitude }
+        : undefined,
     },
   )
 
@@ -217,6 +273,25 @@ async function geocodeAddress(address: string) {
 }
 
 /**
+ * Resolves an autocomplete suggestion by its `place_id` rather than by re-geocoding its display
+ * text. Forward-geocoding the label is lossy — Google re-parses a human string that it had
+ * already resolved unambiguously, and for anything short or repeated across cities it can land on
+ * a completely different place (the on-device "wrong location" report, 2026-09-20). A place id is
+ * exact by construction, so this is what the pick-a-suggestion path must use.
+ */
+async function geocodePlaceId(placeId: string) {
+  const payload = await callGoogleMaps<GoogleGeocodeResponse>('/geocode/json', {
+    place_id: placeId,
+  })
+
+  const [result] = payload.results
+
+  return {
+    result: result ? mapGeocodeResult(result) : null,
+  }
+}
+
+/**
  * Proxies Google Geocoding (reverse: coordinates -> formatted address +
  * components), used for "use my current location" and the
  * draggable-pin-confirm step.
@@ -233,4 +308,4 @@ async function reverseGeocode(latitude: number, longitude: number) {
   }
 }
 
-export { autocompletePlaces, geocodeAddress, reverseGeocode }
+export { autocompletePlaces, geocodeAddress, geocodePlaceId, reverseGeocode }

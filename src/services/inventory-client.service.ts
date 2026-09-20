@@ -504,7 +504,10 @@ interface InventoryPartialFulfilmentReducedItem {
 }
 
 interface InventoryPartialFulfilment {
-  state: 'AWAITING_CUSTOMER' | 'ACCEPTED' | 'DECLINED' | 'EXPIRED'
+  /** `CUSTOMER_ACCEPTED` = the customer approved the revised order and the SHOP still has to
+   *  confirm it; `ACCEPTED` = the shop confirmed it and it is now real. See
+   *  NearCart-Inventory/backend/src/utils/partialFulfilment.ts for the whole state machine. */
+  state: 'AWAITING_CUSTOMER' | 'CUSTOMER_ACCEPTED' | 'ACCEPTED' | 'DECLINED' | 'EXPIRED'
   proposedAt: string
   respondedAt: string | null
   expiresAt: string

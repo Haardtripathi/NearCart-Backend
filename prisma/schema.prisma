@@ -166,6 +166,16 @@ model Shop {
   @@index([publicCatalogEnabled])
   @@index([inventoryOrganizationId])
   @@index([inventoryBranchId])
+  // Every customer-facing shop query filters on exactly this triple (see PUBLIC_SHOP_WHERE /
+  // PUBLIC_MAPPED_SHOP_WHERE in public-storefront.service.ts) and then narrows by latitude for
+  // the hyperlocal bounding box. The three single-column indexes above are each low-cardinality
+  // on their own — approvalStatus has 3 values, the two booleans have 2 — so SQLite can only use
+  // one and still scans most of the table. Equality on the leading three columns plus a range on
+  // the trailing one is exactly what this composite serves.
+  @@index([approvalStatus, isActive, publicCatalogEnabled, latitude])
+  // The shop-type/category filter, on the no-coordinates path where the bounding box above
+  // cannot apply.
+  @@index([category])
 }
 
 model Address {
@@ -190,6 +200,9 @@ model Address {
 
   @@index([userId])
   @@index([isDefault])
+  // The address book is always read for one user, default first. `isDefault` alone is a boolean
+  // over the whole table and effectively unusable; leading with userId makes it an index scan.
+  @@index([userId, isDefault])
 }
 
 model RefreshToken {
@@ -222,6 +235,9 @@ model DeviceToken {
 
   @@unique([ownerId, expoPushToken])
   @@index([ownerId])
+  // Expo reports back tokens that have been deactivated, and they are deleted by token alone —
+  // a lookup the composite unique above cannot serve, since it does not know the owner.
+  @@index([expoPushToken])
 }
 
 model Order {
@@ -309,6 +325,13 @@ model Order {
   @@index([shopRecordId])
   @@index([status])
   @@index([inventorySalesOrderId])
+  // `GET /api/customer/orders` filters by customer and sorts by createdAt desc. With only the
+  // single-column customerUserId index, SQLite has to sort every one of that customer's orders
+  // on each page load; this composite hands them back already ordered.
+  @@index([customerUserId, createdAt])
+  // The unattended inventory-sync retry sweep looks for FAILED syncs in a given status. Without
+  // this it scans the whole Order table every tick, forever.
+  @@index([inventorySyncStatus, status])
 }
 
 model OrderItem {
@@ -357,6 +380,8 @@ model OrderReview {
 
   @@index([shopId])
   @@index([customerId])
+  // `GET /public/shops/:id/reviews` pages one shop's reviews newest-first.
+  @@index([shopId, createdAt])
 }
 
 model AuditLog {
@@ -435,6 +460,8 @@ model CouponRedemption {
 
   @@index([couponId])
   @@index([userId])
+  // The per-user redemption count checked on every coupon preview and again at checkout.
+  @@index([couponId, userId])
 }
 
 // Round-2 loyalty/rewards feature — append-only earn history behind `CustomerProfile.loyaltyPoints`.
@@ -452,6 +479,10 @@ model LoyaltyLedgerEntry {
   order             Order?          @relation(fields: [orderId], references: [id], onDelete: SetNull)
 
   @@index([customerProfileId])
+  // The loyalty summary reads the newest 50 entries for one profile.
+  @@index([customerProfileId, createdAt])
+  // `getLoyaltyRedemptionForOrder` looks an entry up by its order on every order-detail load.
+  @@index([orderId])
 }
 
 model ShopMembership {

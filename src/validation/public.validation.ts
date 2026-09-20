@@ -37,10 +37,15 @@ const shopGeoQuerySchema = z.object({
   lng: z.coerce.number().min(-180).max(180).optional(),
 })
 
+// `page`/`limit` are optional and backwards compatible — a client that sends neither gets the
+// first page at the service's default size. They exist so the shop directory can never be asked
+// to serialize every shop in the marketplace in one response.
 const shopListQuerySchema = shopGeoQuerySchema.extend({
   search: boundedOptionalTrimmedString,
   category: boundedOptionalTrimmedString,
   city: boundedOptionalTrimmedString,
+  page: z.coerce.number().int().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional(),
 })
 
 const publicSearchQuerySchema = shopGeoQuerySchema.extend({

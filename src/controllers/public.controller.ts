@@ -40,6 +40,7 @@ async function listPublicShopsHandler(
         category: query.category || undefined,
         city: query.city || undefined,
       },
+      { page: query.page, limit: query.limit },
     )
 
     response.status(200).json({

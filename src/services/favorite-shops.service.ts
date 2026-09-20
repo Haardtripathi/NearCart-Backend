@@ -1,7 +1,7 @@
 import prisma from '../lib/prisma'
 import { buildMeta } from '../utils/response'
 import { createHttpError } from '../utils/httpError'
-import { getShopRatingSummary } from './order-review.service'
+import { getShopRatingSummaries } from './order-review.service'
 import { attachLiveEta, mapPublicShopSummary } from './public-storefront.service'
 
 /**
@@ -23,19 +23,27 @@ async function listFavoriteShops(userId: string) {
     include: { shop: true },
   })
 
+  // One grouped aggregate for every favourited shop, not one per shop — this used to fire a
+  // separate `OrderReview` aggregate query per row, so a customer with 40 favourites paid 40
+  // sequential database round trips just to render star ratings.
+  const ratings = await getShopRatingSummaries(favorites.map((favorite) => favorite.shop.id))
+
   const items = await Promise.all(
     favorites.map(async (favorite) => {
-      const [rating, summaryWithEta] = await Promise.all([
-        getShopRatingSummary(favorite.shop.id),
-        attachLiveEta(favorite.shop, mapPublicShopSummary(favorite.shop), null, 'fast'),
-      ])
+      const rating = ratings.get(favorite.shop.id)
+      const summaryWithEta = await attachLiveEta(
+        favorite.shop,
+        mapPublicShopSummary(favorite.shop),
+        null,
+        'fast',
+      )
 
       return {
         favoritedAt: favorite.createdAt,
         shop: {
           ...summaryWithEta,
-          averageRating: rating.averageRating,
-          reviewCount: rating.reviewCount,
+          averageRating: rating?.averageRating ?? null,
+          reviewCount: rating?.reviewCount ?? 0,
         },
       }
     }),

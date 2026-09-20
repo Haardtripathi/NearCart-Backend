@@ -53,6 +53,24 @@ async function getCustomerUser(userId: string): Promise<CustomerUser> {
   return user
 }
 
+/**
+ * The same 404 guard as `getCustomerUser`, reading three columns instead of the user's whole
+ * address book, profile and order count. Most callers below only need the guard — loading a
+ * customer's every address (and counting their every order) to decide whether to 404 is work
+ * that grows with the customer's history for no benefit. `getCustomerProfile`, which actually
+ * renders all of that, still uses the full version.
+ */
+async function assertCustomerAccount(userId: string): Promise<void> {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { role: true, customerProfile: { select: { id: true } } },
+  })
+
+  if (!user || user.role !== 'CUSTOMER' || !user.customerProfile) {
+    throw createHttpError(404, 'Customer profile not found')
+  }
+}
+
 async function setDefaultAddress(
   transaction: Prisma.TransactionClient,
   userId: string,
@@ -168,7 +186,7 @@ async function updateCustomerProfile(
 }
 
 async function listCustomerAddresses(userId: string) {
-  await getCustomerUser(userId)
+  await assertCustomerAccount(userId)
 
   const addresses = await prisma.address.findMany({
     where: {
@@ -189,7 +207,7 @@ async function createCustomerAddress(
   userId: string,
   payload: CreateAddressInput,
 ) {
-  await getCustomerUser(userId)
+  await assertCustomerAccount(userId)
 
   const address = await prisma.$transaction(async (transaction) => {
     const existingAddressCount = await transaction.address.count({
@@ -240,7 +258,7 @@ async function updateCustomerAddress(
   addressId: string,
   payload: UpdateAddressInput,
 ) {
-  await getCustomerUser(userId)
+  await assertCustomerAccount(userId)
 
   const existingAddress = await prisma.address.findFirst({
     where: {
@@ -316,7 +334,7 @@ async function updateCustomerAddress(
 }
 
 async function deleteCustomerAddress(userId: string, addressId: string) {
-  await getCustomerUser(userId)
+  await assertCustomerAccount(userId)
 
   const existingAddress = await prisma.address.findFirst({
     where: {
@@ -348,17 +366,55 @@ async function deleteCustomerAddress(userId: string, addressId: string) {
   }
 }
 
-async function listCustomerOrders(userId: string) {
-  await getCustomerUser(userId)
+// A customer's order history only grows. The list renders `mapOrderPreview`'s dozen fields, so
+// it reads those columns instead of every column of every order the customer has ever placed
+// (which includes the delivery address, notes, driver details and the inventory-sync error blob),
+// and it reads one page of them rather than all of them.
+const CUSTOMER_ORDERS_DEFAULT_LIMIT = 25
+const CUSTOMER_ORDERS_MAX_LIMIT = 100
 
-  const orders = await prisma.order.findMany({
-    where: {
-      customerUserId: userId,
-    },
-    orderBy: {
-      createdAt: 'desc',
-    },
-  })
+const ORDER_PREVIEW_SELECT = {
+  id: true,
+  orderNumber: true,
+  customerUserId: true,
+  shopId: true,
+  shopName: true,
+  status: true,
+  paymentStatus: true,
+  paymentMethod: true,
+  totalAmount: true,
+  customerName: true,
+  placedAt: true,
+  deliveredAt: true,
+  inventorySalesOrderId: true,
+} satisfies Prisma.OrderSelect
+
+async function listCustomerOrders(
+  userId: string,
+  pagination?: { page?: number | null; limit?: number | null },
+) {
+  await assertCustomerAccount(userId)
+
+  const limit = Math.min(
+    Math.max(pagination?.limit ?? CUSTOMER_ORDERS_DEFAULT_LIMIT, 1),
+    CUSTOMER_ORDERS_MAX_LIMIT,
+  )
+  const page = Math.max(pagination?.page ?? 1, 1)
+
+  const [orders, total] = await Promise.all([
+    prisma.order.findMany({
+      where: {
+        customerUserId: userId,
+      },
+      select: ORDER_PREVIEW_SELECT,
+      orderBy: {
+        createdAt: 'desc',
+      },
+      skip: (page - 1) * limit,
+      take: limit,
+    }),
+    prisma.order.count({ where: { customerUserId: userId } }),
+  ])
 
   // "Action needed — the shop can only supply some of this order." Surfaced on the list as well
   // as the detail screen so a customer doesn't have to open an order to discover it is blocked on
@@ -374,7 +430,13 @@ async function listCustomerOrders(userId: string) {
       partialFulfilment: awaitingResponse.get(order.id) ?? null,
     })),
     meta: buildMeta({
+      // Unchanged meaning: how many orders this response carries. `matched` is the customer's
+      // full history size, for a client that wants to page through it.
       total: orders.length,
+      matched: total,
+      page,
+      limit,
+      hasMore: page * limit < total,
     }),
   }
 }
@@ -383,7 +445,7 @@ async function registerCustomerDeviceToken(
   userId: string,
   payload: RegisterDeviceTokenInput,
 ) {
-  await getCustomerUser(userId)
+  await assertCustomerAccount(userId)
 
   const deviceToken = await prisma.deviceToken.upsert({
     where: {
