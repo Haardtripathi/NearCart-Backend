@@ -15,7 +15,8 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",
-    "prisma:push": "prisma db push"
+    "prisma:push": "prisma db push",
+    "postinstall": "prisma generate"
   },
   "dependencies": {
     "@libsql/client": "^0.15.15",
@@ -35,6 +36,7 @@
     "multer": "^2.1.1",
     "node-cron": "^4.6.0",
     "nodemailer": "^7.0.13",
+    "prisma": "^7.6.0",
     "rate-limit-redis": "^4.3.1",
     "zod": "^4.3.6"
   },
@@ -50,7 +52,6 @@
     "@types/nodemailer": "^7.0.12",
     "@types/supertest": "^6.0.3",
     "nodemon": "^3.1.14",
-    "prisma": "^7.6.0",
     "supertest": "^7.2.2",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3",
@@ -63,5 +64,8 @@
     "esbuild@0.27.7": true,
     "prisma@7.6.0": true,
     "protobufjs@7.6.5": true
+  },
+  "engines": {
+    "node": ">=22"
   }
 }
