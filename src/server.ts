@@ -6,6 +6,7 @@ import prisma from './lib/prisma'
 import { ensureBootstrapAdmin } from './services/bootstrap.service'
 import { registerKeepAlivePing } from './jobs/keep-alive'
 import { registerInventorySyncRetrySweep } from './jobs/inventory-sync-retry-sweep'
+import { registerShopOpenReminder } from './jobs/shop-open-reminder'
 
 async function startServer(): Promise<void> {
   try {
@@ -25,6 +26,7 @@ async function startServer(): Promise<void> {
       console.log(`${env.appName} listening on port ${env.port}`)
       registerKeepAlivePing()
       registerInventorySyncRetrySweep()
+      registerShopOpenReminder()
     })
 
     const shutdown = (signal: NodeJS.Signals): void => {

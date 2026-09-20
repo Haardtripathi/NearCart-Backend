@@ -669,6 +669,24 @@ async function getInventoryActiveOrderCount(input: {
   )
 }
 
+/**
+ * Asks the shop's back office to nudge its staff, in the Partner app, to confirm the shop is open
+ * today. This side runs the sweep because it owns the flag and can find every unconfirmed shop in
+ * one indexed query; the staff device tokens live over there, which is why the push itself does
+ * not happen here.
+ *
+ * Deliberately sends no message body — the wording is fixed on the Inventory side so this can
+ * never become a way to push arbitrary text to a shop's staff.
+ */
+async function sendInventoryShopOpenReminder(input: {
+  organizationId: string
+}): Promise<{ organizationId: string; notified: boolean }> {
+  return inventoryRequest<{ organizationId: string; notified: boolean }>(
+    `${MARKETPLACE_BRIDGE_PREFIX}/organizations/${input.organizationId}/shop-open-reminder`,
+    { method: 'POST' },
+  )
+}
+
 export {
   cancelSalesOrderInInventory,
   checkInventoryAvailability,
@@ -680,6 +698,7 @@ export {
   listInventoryMarketplaceOrganizations,
   pushSalesOrderToInventory,
   respondToInventoryPartialFulfilment,
+  sendInventoryShopOpenReminder,
 }
 
 export type {

@@ -1301,6 +1301,7 @@ async function listInventoryMappingOptions(search?: string | null) {
 }
 
 export {
+  PUBLIC_SHOP_WHERE,
   attachLiveEta,
   getAuthoritativeCheckoutSnapshot,
   getMappedPublicShop,
