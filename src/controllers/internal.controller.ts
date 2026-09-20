@@ -5,23 +5,22 @@ import {
   listLinkedShopsTodayStatus,
   updateLinkedShopsTodayStatus,
 } from '../services/internal-shop-status.service'
-import { applyInventoryOrderEvent } from '../services/orders.service'
+import {
+  applyInventoryOrderEvent,
+  INVENTORY_ORDER_EVENT_TYPES,
+} from '../services/orders.service'
 import { updateShopTodayStatusSchema } from '../validation/shop-owner.validation'
 
 const orderEventSchema = z.object({
   externalOrderId: z.string().trim().min(1),
   status: z.string().trim().min(1),
-  eventType: z.enum([
-    'CONFIRMED',
-    'REJECTED',
-    'READY',
-    'DRIVER_ASSIGNED',
-    'DRIVER_UNASSIGNED',
-    'OUT_FOR_DELIVERY',
-    'DELIVERED',
-    'AUTO_CANCELLED',
-    'CANCELLED',
-  ]),
+  // Deliberately a plain string, not `z.enum(...)`: an event type this deployment doesn't know
+  // about (the sibling NearCart-Inventory repo shipping a new one first — exactly what happened
+  // when partial fulfilment added PARTIAL_PROPOSED/ACCEPTED/DECLINED/EXPIRED) used to fail
+  // validation and come back as a 400, which reads on the Inventory side as "the webhook is
+  // broken". Unknown types are now dropped quietly with a 200 by the handler below, so a
+  // rollout in either order is safe.
+  eventType: z.string().trim().min(1),
   assignedDriver: z
     .object({
       fullName: z.string(),
@@ -34,7 +33,14 @@ const orderEventSchema = z.object({
   // Optional/nullable so payloads from before that sibling repo ships its side of this — or a
   // DELIVERED event where the driver simply didn't capture a photo — still validate cleanly.
   deliveryProofPhotoUrl: z.string().trim().min(1).nullable().optional(),
+  // The shop's partial-fulfilment proposal, sent on every PARTIAL_* event. Passed through
+  // unvalidated on purpose — this is a trusted, shared-secret-authenticated service-to-service
+  // call, and the one consumer (`applyInventoryOrderEvent`, for the push body) treats every
+  // field defensively.
+  partialFulfilment: z.unknown().optional(),
 })
+
+const KNOWN_ORDER_EVENT_TYPES = new Set<string>(INVENTORY_ORDER_EVENT_TYPES)
 
 async function receiveInventoryOrderEventHandler(
   request: Request,
@@ -43,7 +49,21 @@ async function receiveInventoryOrderEventHandler(
 ): Promise<void> {
   try {
     const payload = orderEventSchema.parse(request.body)
-    await applyInventoryOrderEvent(payload)
+
+    if (!KNOWN_ORDER_EVENT_TYPES.has(payload.eventType)) {
+      // Acknowledge and drop. The sender is fire-and-forget with no retry, so a non-2xx here
+      // would just produce a confusing warning in its logs for an event we legitimately have
+      // nothing to do with.
+      console.warn(
+        `[NearKart] Ignoring unknown inventory order event type "${payload.eventType}" for order ${payload.externalOrderId}.`,
+      )
+      response.status(200).json({ received: true, ignored: true })
+      return
+    }
+
+    await applyInventoryOrderEvent(
+      payload as Parameters<typeof applyInventoryOrderEvent>[0],
+    )
 
     response.status(200).json({ received: true })
   } catch (error) {

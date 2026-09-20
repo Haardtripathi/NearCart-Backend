@@ -466,6 +466,63 @@ interface InventorySalesOrderStatusResponse {
   // genuinely no driver assigned right now (treat as "clear any stored driver info").
   assignedDriver?: { fullName: string; phone: string; vehicleType: string } | null
   driverAssignedAt?: string | null
+  // The shop's partial-fulfilment proposal ("I can only supply 3 of your 5 items") and where it
+  // stands. `undefined` means an Inventory deployment that predates the feature (no signal);
+  // `null` means there is genuinely nothing for the customer to review. See
+  // `InventoryPartialFulfilment` below.
+  partialFulfilment?: InventoryPartialFulfilment | null
+}
+
+/**
+ * Mirrors `utils/partialFulfilment.ts` in the NearCart-Inventory repo. Amounts are whole rupees,
+ * the same unit as every `Int` money column on `Order`.
+ *
+ * `productId`/`variantId` on each entry are the INVENTORY catalog ids — they are what this app
+ * matches its own `OrderItem` rows against (`inventoryProductId`/`inventoryVariantId`), since
+ * `itemId` is a `SalesOrderItem.id` this app has no copy of.
+ */
+interface InventoryPartialFulfilmentRemovedItem {
+  itemId: string
+  productId: string | null
+  variantId: string | null
+  name: string
+  variantName: string | null
+  quantity: number
+  lineTotal: number
+  reason: string | null
+}
+
+interface InventoryPartialFulfilmentReducedItem {
+  itemId: string
+  productId: string | null
+  variantId: string | null
+  name: string
+  variantName: string | null
+  fromQuantity: number
+  toQuantity: number
+  lineTotal: number
+}
+
+interface InventoryPartialFulfilment {
+  state: 'AWAITING_CUSTOMER' | 'ACCEPTED' | 'DECLINED' | 'EXPIRED'
+  proposedAt: string
+  respondedAt: string | null
+  expiresAt: string
+  note: string | null
+  removedItems: InventoryPartialFulfilmentRemovedItem[]
+  reducedItems: InventoryPartialFulfilmentReducedItem[]
+  originalTotal: number
+  proposedTotal: number
+  proposedAmountPayable: number | null
+}
+
+interface PartialFulfilmentResponseResult {
+  salesOrderId: string
+  orderNumber: string
+  status: string
+  partialFulfilment?: InventoryPartialFulfilment | null
+  /** false when the proposal had already been answered — the call was a successful no-op. */
+  applied: boolean
 }
 
 // NOTE ON PATH PREFIX: the bridge contract this was built against
@@ -516,6 +573,40 @@ async function getInventorySalesOrderStatus(
 ): Promise<InventorySalesOrderStatusResponse> {
   return inventoryRequest<InventorySalesOrderStatusResponse>(
     `${MARKETPLACE_BRIDGE_PREFIX}/sales-orders/by-external/${externalOrderId}`,
+  )
+}
+
+/**
+ * Sends the customer's answer to a shop's partial-fulfilment proposal back across the bridge.
+ * Accepting there applies the reduced item set, confirms the order and moves stock for the final
+ * quantities only; declining cancels it. Idempotent on the Inventory side — a repeat call
+ * returns the current state with `applied: false` rather than erroring.
+ *
+ * `revisedPayment` is how this app corrects the bill when its OWN rules change it beyond the
+ * plain item-total reduction Inventory can compute — above all a coupon whose minimum spend no
+ * longer holds once items were dropped, which pushes the amount payable back UP. Without it the
+ * shop and the driver would be told to collect the un-corrected figure.
+ */
+async function respondToInventoryPartialFulfilment(input: {
+  organizationId: string
+  externalOrderId: string
+  accepted: boolean
+  revisedPayment?: {
+    discountTotal?: number
+    loyaltyDiscount?: number
+    couponCode?: string | null
+    amountPayable?: number
+  }
+}): Promise<PartialFulfilmentResponseResult> {
+  return inventoryRequest<PartialFulfilmentResponseResult>(
+    `${MARKETPLACE_BRIDGE_PREFIX}/organizations/${input.organizationId}/sales-orders/by-external/${input.externalOrderId}/partial-response`,
+    {
+      method: 'POST',
+      body: {
+        accepted: input.accepted,
+        ...(input.revisedPayment ? { revisedPayment: input.revisedPayment } : {}),
+      },
+    },
   )
 }
 
@@ -585,6 +676,7 @@ export {
   listInventoryCatalog,
   listInventoryMarketplaceOrganizations,
   pushSalesOrderToInventory,
+  respondToInventoryPartialFulfilment,
 }
 
 export type {
@@ -596,7 +688,11 @@ export type {
   InventoryCatalogProductResponse,
   InventoryCatalogResponse,
   InventoryMarketplaceOption,
+  InventoryPartialFulfilment,
+  InventoryPartialFulfilmentReducedItem,
+  InventoryPartialFulfilmentRemovedItem,
   InventorySalesOrderStatusResponse,
+  PartialFulfilmentResponseResult,
   PushSalesOrderInput,
   PushSalesOrderPayment,
   PushSalesOrderResponse,

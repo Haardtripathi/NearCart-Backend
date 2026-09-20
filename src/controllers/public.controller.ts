@@ -11,7 +11,9 @@ import {
   validatePublicCart,
 } from '../services/public-storefront.service'
 import { listShopReviews } from '../services/order-review.service'
+import { quoteBasketDelivery } from '../services/delivery-pricing.service'
 import {
+  deliveryQuoteSchema,
   publicCartValidationSchema,
   publicSearchQuerySchema,
   publicTrendingQuerySchema,
@@ -258,7 +260,39 @@ async function validatePublicCartHandler(
   }
 }
 
+/**
+ * `POST /api/public/delivery-quote` — what a multi-shop basket actually costs to deliver, with
+ * shops that are close to each other charged as one trip. Public and unauthenticated like the
+ * rest of `/public` (it reveals nothing a customer can't already see on the shop pages), and
+ * cheap: one `shop.findMany` plus arithmetic, no inventory-bridge calls.
+ */
+async function getDeliveryQuoteHandler(
+  request: Request,
+  response: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const payload = deliveryQuoteSchema.parse(request.body)
+    const result = await quoteBasketDelivery({
+      shopIds: payload.shopIds,
+      latitude: payload.lat,
+      longitude: payload.lng,
+    })
+
+    response.status(200).json({
+      ...result,
+      meta: {
+        source: 'database',
+        timestamp: getTimestamp(),
+      },
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
 export {
+  getDeliveryQuoteHandler,
   getPublicCatalogProductHandler,
   getPublicShopHandler,
   listPublicShopCatalogHandler,

@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { cartValidationItemSchema } from './public.validation'
+import { basketShopIdsSchema, cartValidationItemSchema } from './public.validation'
 
 // Adversarial sweep bug fix: none of the free-text fields below had an upper bound — same
 // live-confirmed unbounded-length gap as customer.validation.ts/shop-owner.validation.ts/
@@ -48,6 +48,14 @@ const checkoutPayloadSchema = z.object({
   // posture the coupon code already follows. Capped generously — the real cap is the customer's
   // balance and the per-order redemption ceiling, both enforced server-side.
   useLoyaltyPoints: z.number().int().min(0).max(1_000_000).optional(),
+  // Multi-shop basket: every shop the customer is checking out from in this one go (this shop
+  // included or not — either is fine). When present the server re-derives the delivery clustering
+  // from these ids and stores THIS shop's allocated share as the order's `deliveryFee`, so the
+  // created order charges exactly what the cart/checkout preview quoted. Same "never trust a
+  // client-supplied money figure" posture as `couponCode`/`useLoyaltyPoints` above — these are
+  // shop identifiers, not an amount, and every one of them is re-loaded and re-validated
+  // server-side. Omitted = today's behaviour, a full independent fee for this shop alone.
+  basketShopIds: basketShopIdsSchema,
   // `expectedPrice`/`expectedMrp` are optional and only used, when present, to detect a price
   // change between whenever the client last saw this item's price and the moment checkout is
   // actually submitted — see `getAuthoritativeCheckoutSnapshot`/`createOrderLocked` in
@@ -72,9 +80,25 @@ const checkoutPayloadSchema = z.object({
     .max(MAX_CHECKOUT_ITEMS, `An order can contain at most ${MAX_CHECKOUT_ITEMS} distinct items`),
 })
 
+/**
+ * The customer's answer to a shop's partial-fulfilment proposal. Deliberately just the one
+ * boolean: the proposal itself (what was removed, what was reduced, what it now costs) lives in
+ * the shop's back office and is read live over the bridge — a client echoing it back could only
+ * ever be stale or tampered with.
+ */
+const partialFulfilmentResponseSchema = z.object({
+  accepted: z.boolean(),
+})
+
+type PartialFulfilmentResponseInput = z.infer<typeof partialFulfilmentResponseSchema>
+
 type CheckoutPayloadInput = z.infer<typeof checkoutPayloadSchema>
 type CheckoutItemInput = CheckoutPayloadInput['items'][number]
 
-export { checkoutPayloadSchema }
+export { checkoutPayloadSchema, partialFulfilmentResponseSchema }
 
-export type { CheckoutItemInput, CheckoutPayloadInput }
+export type {
+  CheckoutItemInput,
+  CheckoutPayloadInput,
+  PartialFulfilmentResponseInput,
+}

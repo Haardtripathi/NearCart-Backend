@@ -1,6 +1,7 @@
 import { Router } from 'express'
 
 import {
+  getDeliveryQuoteHandler,
   getPublicCatalogProductHandler,
   getPublicShopHandler,
   listPublicShopCatalogHandler,
@@ -29,5 +30,6 @@ router.get(
 )
 router.get('/public/shops/:shopIdOrSlug/reviews', listShopReviewsHandler)
 router.post('/public/cart/validate', validatePublicCartHandler)
+router.post('/public/delivery-quote', getDeliveryQuoteHandler)
 
 export default router

@@ -15,6 +15,8 @@ import {
 import { getWeatherFeeForCondition, getWeatherImpact } from './weather.service'
 import { createHttpError } from '../utils/httpError'
 import { assertWithinServiceArea, computeDeliveryFee, haversineDistanceKm } from '../utils/geo'
+import { resolveBasketDeliveryAllocation } from './delivery-pricing.service'
+import type { BasketAllocation } from './delivery-pricing.service'
 import { assertShopIsOpenToday, getShopTodayStatus } from '../utils/shop-availability'
 import type {
   CartValidationItemInput,
@@ -397,6 +399,12 @@ async function buildValidatedCartSnapshot(
   // missing coordinates — fall back to the shop's flat `deliveryFeeDefault` rather than blocking
   // or charging nothing, since there's nothing to compute a distance against.
   let deliveryFee = 0
+  // Multi-shop basket (`basketShopIds`): this shop's share of ONE cluster-aware route fee rather
+  // than a full independent fee, so a basket from two shops on the same street isn't charged two
+  // complete deliveries. Re-derived server-side from the shop ids — the client's number is never
+  // used — and null whenever clustering doesn't apply, in which case the single-shop behaviour
+  // below is completely untouched. See `services/delivery-pricing.service.ts`.
+  let basketAllocation: BasketAllocation | null = null
 
   if (shop.deliveryEnabled) {
     if (
@@ -405,13 +413,26 @@ async function buildValidatedCartSnapshot(
       payload.latitude != null &&
       payload.longitude != null
     ) {
-      const distanceKm = haversineDistanceKm(
-        shop.latitude,
-        shop.longitude,
-        payload.latitude,
-        payload.longitude,
-      )
-      deliveryFee = computeDeliveryFee(distanceKm)
+      basketAllocation = payload.basketShopIds?.length
+        ? await resolveBasketDeliveryAllocation({
+            shopId: shop.id,
+            basketShopIds: payload.basketShopIds,
+            latitude: payload.latitude,
+            longitude: payload.longitude,
+          })
+        : null
+
+      if (basketAllocation) {
+        deliveryFee = basketAllocation.fee
+      } else {
+        const distanceKm = haversineDistanceKm(
+          shop.latitude,
+          shop.longitude,
+          payload.latitude,
+          payload.longitude,
+        )
+        deliveryFee = computeDeliveryFee(distanceKm)
+      }
     } else {
       deliveryFee = shop.deliveryFeeDefault
     }
@@ -429,7 +450,14 @@ async function buildValidatedCartSnapshot(
     weatherCondition = weatherImpact.condition
   }
 
-  const weatherSurchargeFee = getWeatherFeeForCondition(weatherCondition)
+  // One trip through the weather is one surcharge. When this shop's order shares a trip with
+  // another shop's, exactly one of them carries it (a deterministic function of the basket, so
+  // every shop's validate/checkout call independently agrees on which) — otherwise a clustered
+  // basket would pay the bad-weather premium twice for a single ride.
+  const weatherSurchargeFee =
+    basketAllocation && basketAllocation.combined && !basketAllocation.bearsWeatherSurcharge
+      ? 0
+      : getWeatherFeeForCondition(weatherCondition)
   const totalAmount = subtotal + deliveryFee + weatherSurchargeFee
 
   return {
@@ -443,6 +471,16 @@ async function buildValidatedCartSnapshot(
       currencyCode: inventoryResult.shopInventory.organization.currencyCode,
       subtotal,
       deliveryFee,
+      // Present (non-null) only when this shop's delivery is genuinely sharing a trip with other
+      // shops in the same basket, so a client can say "one trip covers both" instead of quietly
+      // showing a smaller number than the shop's page advertised.
+      deliveryCluster: basketAllocation?.combined
+        ? {
+            shopIds: basketAllocation.clusterShopIds,
+            routeKm: Number(basketAllocation.routeKm.toFixed(2)),
+            independentFee: basketAllocation.independentFee,
+          }
+        : null,
       weatherSurchargeFee,
       weatherCondition,
       totalAmount,
@@ -954,12 +992,17 @@ async function getAuthoritativeCheckoutSnapshot(payload: {
   // `orders.service.ts`'s `createOrderLocked`, which now resolves these before this call).
   latitude?: number | null
   longitude?: number | null
+  // The other shops in the same multi-shop basket, if any — forwarded so checkout charges the
+  // same cluster-aware share the cart preview quoted, instead of a full independent fee. The
+  // server re-derives the clustering from these ids itself; see `resolveBasketDeliveryAllocation`.
+  basketShopIds?: string[] | null
 }) {
   const snapshot = await buildValidatedCartSnapshot({
     shopId: payload.shopId,
     lang: payload.lang ?? undefined,
     latitude: payload.latitude,
     longitude: payload.longitude,
+    basketShopIds: payload.basketShopIds ?? undefined,
     items: payload.items.map((item) => ({
       productId: item.productId,
       variantId: item.variantId ?? undefined,

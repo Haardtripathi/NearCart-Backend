@@ -5,9 +5,13 @@ import {
   cancelOrder,
   createOrder,
   getOrderById,
+  respondToPartialFulfilment,
 } from '../services/orders.service'
 import { createOrderReview } from '../services/order-review.service'
-import { checkoutPayloadSchema } from '../validation/orders.validation'
+import {
+  checkoutPayloadSchema,
+  partialFulfilmentResponseSchema,
+} from '../validation/orders.validation'
 import { createOrderReviewSchema } from '../validation/order-review.validation'
 
 async function createOrderHandler(
@@ -105,9 +109,39 @@ async function createOrderReviewHandler(
   }
 }
 
+async function respondToPartialFulfilmentHandler(
+  request: Request,
+  response: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const payload = partialFulfilmentResponseSchema.parse(request.body)
+    const order = await respondToPartialFulfilment(
+      request.params.orderId as string,
+      {
+        userId: request.auth!.userId,
+        role: request.auth!.role,
+        shopOwnerProfileId: request.auth!.user.shopOwnerProfile?.id ?? null,
+      },
+      payload,
+    )
+
+    response.status(200).json({
+      item: order,
+      meta: {
+        source: 'database',
+        timestamp: getTimestamp(),
+      },
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
 export {
   cancelOrderHandler,
   createOrderHandler,
   createOrderReviewHandler,
   getOrderByIdHandler,
+  respondToPartialFulfilmentHandler,
 }

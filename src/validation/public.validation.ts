@@ -73,6 +73,33 @@ const shopCatalogQuerySchema = z.object({
   lng: z.coerce.number().min(-180).max(180).optional(),
 })
 
+// A basket is a handful of shops at most — the delivery-quote endpoint and the cluster-aware
+// checkout allocation both cap the number they will actually *cluster* at MAX_CLUSTERED_SHOPS
+// (services/delivery-pricing.service.ts). This is the outer request bound: it only stops an
+// oversized array arriving at all, and is deliberately looser than the pricing cap so a client
+// sending a slightly stale basket gets sensible pricing rather than a 400.
+const MAX_BASKET_SHOP_IDS = 25
+
+// The other shops in the customer's multi-shop basket. Optional everywhere it appears: when it's
+// absent the delivery fee is computed exactly as it always was (this shop alone). When present,
+// the server re-derives the clustering ITSELF from these ids (re-loading each shop from the
+// database, dropping anything unknown/unmapped/out of radius) and charges this shop its allocated
+// share — the ids are a hint about what the basket contains, never a claim about what anything
+// costs. See `resolveBasketDeliveryAllocation`.
+const basketShopIdsSchema = z
+  .array(z.string().trim().min(1).max(MAX_ID_LENGTH))
+  .max(MAX_BASKET_SHOP_IDS)
+  .optional()
+
+const deliveryQuoteSchema = z.object({
+  shopIds: z
+    .array(z.string().trim().min(1, 'Shop identifier is required').max(MAX_ID_LENGTH))
+    .min(1, 'At least one shop is required')
+    .max(MAX_BASKET_SHOP_IDS, `A basket can contain at most ${MAX_BASKET_SHOP_IDS} shops`),
+  lat: z.number().min(-90).max(90),
+  lng: z.number().min(-180).max(180),
+})
+
 const cartValidationItemSchema = z.object({
   productId: z.string().trim().min(1, 'Product identifier is required').max(MAX_ID_LENGTH),
   variantId: boundedOptionalTrimmedString,
@@ -100,7 +127,12 @@ const publicCartValidationSchema = z.object({
   // only the shop-open check (which needs no customer location) is unconditionally enforced.
   latitude: z.number().min(-90).max(90).optional().nullable(),
   longitude: z.number().min(-180).max(180).optional().nullable(),
+  // Multi-shop basket: lets the cart preview show the same cluster-aware delivery fee the order
+  // will actually be created with, instead of a full independent fee the customer never pays.
+  basketShopIds: basketShopIdsSchema,
 })
+
+type DeliveryQuoteInput = z.infer<typeof deliveryQuoteSchema>
 
 type ShopCatalogQueryInput = z.infer<typeof shopCatalogQuerySchema>
 type CartValidationItemInput = z.infer<typeof cartValidationItemSchema>
@@ -111,7 +143,9 @@ type PublicSearchQueryInput = z.infer<typeof publicSearchQuerySchema>
 type PublicTrendingQueryInput = z.infer<typeof publicTrendingQuerySchema>
 
 export {
+  basketShopIdsSchema,
   cartValidationItemSchema,
+  deliveryQuoteSchema,
   publicCartValidationSchema,
   publicSearchQuerySchema,
   publicTrendingQuerySchema,
@@ -122,6 +156,7 @@ export {
 
 export type {
   CartValidationItemInput,
+  DeliveryQuoteInput,
   PublicCartValidationInput,
   PublicSearchQueryInput,
   PublicTrendingQueryInput,

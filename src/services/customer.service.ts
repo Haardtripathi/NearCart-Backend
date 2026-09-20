@@ -1,6 +1,7 @@
 import type { Prisma } from '@prisma/client'
 
 import prisma from '../lib/prisma'
+import { loadPartialFulfilmentsForOrderList } from './orders.service'
 import { buildMeta } from '../utils/response'
 import {
   mapAddress,
@@ -359,8 +360,19 @@ async function listCustomerOrders(userId: string) {
     },
   })
 
+  // "Action needed — the shop can only supply some of this order." Surfaced on the list as well
+  // as the detail screen so a customer doesn't have to open an order to discover it is blocked on
+  // them. Bounded and fail-soft (see `loadPartialFulfilmentsForOrderList`): a slow or unreachable
+  // bridge costs the badge, never the list.
+  const awaitingResponse = await loadPartialFulfilmentsForOrderList(orders)
+
   return {
-    items: orders.map(mapOrderPreview),
+    items: orders.map((order) => ({
+      ...mapOrderPreview(order),
+      // null for everything that isn't waiting on the customer right now — including orders that
+      // weren't checked at all because they were outside the lookup budget.
+      partialFulfilment: awaitingResponse.get(order.id) ?? null,
+    })),
     meta: buildMeta({
       total: orders.length,
     }),

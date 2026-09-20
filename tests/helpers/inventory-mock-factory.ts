@@ -48,6 +48,17 @@ function createInventoryClientMock() {
       status: 'PENDING',
     })),
 
+    // Partial fulfilment: the customer's answer to a shop's "I can only supply 3 of your 5
+    // items" proposal. Individual specs override this per test with mockResolvedValueOnce —
+    // this default just keeps the shape honest for files that never touch the feature.
+    respondToInventoryPartialFulfilment: vi.fn(async (input: { accepted: boolean }) => ({
+      salesOrderId: 'mock-sales-order',
+      orderNumber: 'MOCK-SO-0001',
+      status: input.accepted ? 'CONFIRMED' : 'CANCELLED',
+      partialFulfilment: null,
+      applied: true,
+    })),
+
     cancelSalesOrderInInventory: vi.fn(async () => ({
       salesOrderId: 'mock-sales-order',
       orderNumber: 'MOCK-SO-0001',

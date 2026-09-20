@@ -144,6 +144,15 @@ const env = {
   deliveryFeePerKm: parseInteger(process.env.DELIVERY_FEE_PER_KM, 8),
   deliveryFeeMin: parseInteger(process.env.DELIVERY_FEE_MIN, 20),
   deliveryFeeMax: parseInteger(process.env.DELIVERY_FEE_MAX, 150),
+  // Cluster-aware multi-shop pricing (see `services/delivery-pricing.service.ts`). Two shops in
+  // the same basket whose shop-to-shop distance is within `deliveryClusterRadiusKm` are charged
+  // as ONE route instead of two full fees, plus `deliveryExtraPickupFee` per extra pickup for the
+  // driver's extra stop time even when the detour adds no distance. The radius is what bounds the
+  // subsidy the business absorbs (each shop's order still gets its own driver, paid off the same
+  // curve by NearCart-Inventory) — raise it and the subsidy grows with it.
+  deliveryClusterRadiusKm:
+    Number.parseFloat(process.env.DELIVERY_CLUSTER_RADIUS_KM || '') || 1.5,
+  deliveryExtraPickupFee: parseInteger(process.env.DELIVERY_EXTRA_PICKUP_FEE, 10),
   // Number of reverse-proxy hops Express should trust when deriving the
   // client IP from X-Forwarded-For (e.g. 1 behind a single nginx/Render/
   // Railway/Heroku-style proxy). Defaults to 1 in production — nearly every

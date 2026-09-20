@@ -18,8 +18,12 @@ import {
   cancelSalesOrderInInventory,
   getInventorySalesOrderStatus,
   pushSalesOrderToInventory,
+  respondToInventoryPartialFulfilment,
 } from './inventory-client.service'
-import type { PushSalesOrderPayment } from './inventory-client.service'
+import type {
+  InventoryPartialFulfilment,
+  PushSalesOrderPayment,
+} from './inventory-client.service'
 import { createHttpError } from '../utils/httpError'
 import { assertWithinServiceArea } from '../utils/geo'
 import { mapOrder } from '../utils/serializers'
@@ -394,6 +398,19 @@ async function createOrderLocked(
     items: payload.items,
     latitude: effectiveLatitude,
     longitude: effectiveLongitude,
+    // Multi-shop basket: this order's delivery fee is its share of ONE route covering every
+    // nearby shop in the basket, re-derived server-side from these ids (never from any
+    // client-supplied amount). Absent = exactly today's single-shop pricing.
+    //
+    // KNOWN, ACCEPTED EDGE — deliberately NOT compensated for: each shop's order is created
+    // independently, so if one order in a clustered basket fails (or is later cancelled, or is
+    // cut down by the shop's partial-fulfilment proposal), the orders that DID succeed keep the
+    // shared cluster price for a trip that ends up carrying less than it was priced for. That
+    // always favours the customer, and the difference is the same bounded subsidy clustering
+    // already accepts. Item-level reductions never move the delivery fee either way — the driver
+    // still makes the same ride (see `applyPartialFulfilmentToOrder`, which recomputes the total
+    // from the stored `deliveryFee` rather than re-deriving it).
+    basketShopIds: payload.basketShopIds ?? null,
   })
   const { shop } = checkoutSnapshot
 
@@ -936,12 +953,18 @@ function isForwardOrderStatusTransition(current: OrderStatus, next: OrderStatus)
  * change locally (see `mapInventorySalesOrderStatus` for the mapping).
  * Never throws: a sync hiccup should degrade to "show the last known local
  * status" rather than fail the customer's order-detail view.
+ *
+ * Also returns the shop's live partial-fulfilment proposal ("I can only supply 3 of your 5
+ * items"), which is read off this same poll rather than through an endpoint of its own — it is
+ * the shop, not this app, that owns that state, and nothing about it is stored locally. Same
+ * fail-soft contract as the status half: an unreachable bridge yields `null` (order renders
+ * without the proposal) instead of an error.
  */
 async function refreshOrderStatusFromInventory(
   order: OrderWithRelations,
-): Promise<OrderWithRelations> {
+): Promise<{ order: OrderWithRelations; partialFulfilment: InventoryPartialFulfilment | null }> {
   if (!order.inventorySalesOrderId || TERMINAL_ORDER_STATUSES.has(order.status)) {
-    return order
+    return { order, partialFulfilment: null }
   }
 
   try {
@@ -1034,7 +1057,7 @@ async function refreshOrderStatusFromInventory(
     }
 
     if (Object.keys(updateData).length === 0) {
-      return order
+      return { order, partialFulfilment: bridgeStatus.partialFulfilment ?? null }
     }
 
     // A successful poll that only changed driver fields (no forward status move) still counts as
@@ -1057,14 +1080,17 @@ async function refreshOrderStatusFromInventory(
       await awardLoyaltyPointsForOrder(updatedOrder)
     }
 
-    return updatedOrder
+    return {
+      order: updatedOrder,
+      partialFulfilment: bridgeStatus.partialFulfilment ?? null,
+    }
   } catch (error) {
     console.warn(
       `[NearKart] Failed to refresh order ${order.orderNumber} status from the inventory bridge:`,
       error instanceof Error ? error.message : error,
     )
 
-    return order
+    return { order, partialFulfilment: null }
   }
 }
 
@@ -1165,11 +1191,15 @@ async function getOrderById(orderId: string, accessContext: OrderAccessContext) 
 
   assertOrderAccessible(order, accessContext)
 
-  const refreshedOrder = await refreshOrderStatusFromInventory(order)
+  const { order: refreshedOrder, partialFulfilment } =
+    await refreshOrderStatusFromInventory(order)
   const tracking = await buildOrderTracking(refreshedOrder)
   const loyaltyRedemption = await getLoyaltyRedemptionForOrder(refreshedOrder.id)
 
-  return { ...mapOrder(refreshedOrder), tracking, loyaltyRedemption }
+  // `partialFulfilment` is read live from the shop's back office on every fetch and never
+  // stored here — the shop owns it, and a stale local copy of "do you approve this?" would be
+  // worse than none. Null when there is nothing to review, or when the bridge was unreachable.
+  return { ...mapOrder(refreshedOrder), tracking, loyaltyRedemption, partialFulfilment }
 }
 
 /**
@@ -1213,7 +1243,7 @@ async function cancelOrder(orderId: string, accessContext: OrderAccessContext) {
   // and force-cancel an order the shop already committed to and deducted stock for.
   // `refreshOrderStatusFromInventory` never throws and only ever moves `status` forward, so this
   // is safe to call unconditionally here.
-  const reconciledOrder = await refreshOrderStatusFromInventory(order)
+  const { order: reconciledOrder } = await refreshOrderStatusFromInventory(order)
 
   if (reconciledOrder.status !== 'PENDING_CONFIRMATION') {
     // The old message hardcoded "it has already been accepted by the shop" for every non-
@@ -1305,20 +1335,35 @@ async function cancelOrder(orderId: string, accessContext: OrderAccessContext) {
   return mapOrder(finalOrder)
 }
 
+const INVENTORY_ORDER_EVENT_TYPES = [
+  'CONFIRMED',
+  'REJECTED',
+  'READY',
+  'DRIVER_ASSIGNED',
+  'DRIVER_UNASSIGNED',
+  'OUT_FOR_DELIVERY',
+  'DELIVERED',
+  'AUTO_CANCELLED',
+  'CANCELLED',
+  // Shop-side partial fulfilment. PARTIAL_PROPOSED carries NO status change at all (the order
+  // stays PENDING on both sides while the customer decides) — it exists purely to notify the
+  // customer that there is something to review.
+  'PARTIAL_PROPOSED',
+  'PARTIAL_ACCEPTED',
+  'PARTIAL_DECLINED',
+  'PARTIAL_EXPIRED',
+] as const
+
+type InventoryOrderEventType = (typeof INVENTORY_ORDER_EVENT_TYPES)[number]
+
 interface InventoryOrderEventInput {
   externalOrderId: string
   status: string
-  eventType:
-    | 'CONFIRMED'
-    | 'REJECTED'
-    | 'READY'
-    | 'DRIVER_ASSIGNED'
-    | 'DRIVER_UNASSIGNED'
-    | 'OUT_FOR_DELIVERY'
-    | 'DELIVERED'
-    | 'AUTO_CANCELLED'
-    | 'CANCELLED'
+  eventType: InventoryOrderEventType
   assignedDriver?: { fullName: string; phone: string; vehicleType: string } | null
+  // Sent on every PARTIAL_* event so the customer push can name what actually changed without a
+  // second round trip back over the bridge.
+  partialFulfilment?: InventoryPartialFulfilment | null
   // Delivery-proof photo (Cloudinary URL), present on a DELIVERED event once the sibling
   // NearCart-Inventory repo sends it. Optional — see `orderEventSchema` in
   // `internal.controller.ts`.
@@ -1326,7 +1371,7 @@ interface InventoryOrderEventInput {
 }
 
 const ORDER_EVENT_NOTIFICATION_COPY: Record<
-  InventoryOrderEventInput['eventType'],
+  InventoryOrderEventType,
   { title: string; body: string }
 > = {
   CONFIRMED: { title: 'Order confirmed', body: 'Your order has been confirmed by the shop.' },
@@ -1353,6 +1398,58 @@ const ORDER_EVENT_NOTIFICATION_COPY: Record<
     title: 'Order cancelled',
     body: 'The shop has cancelled your order.',
   },
+  // Overwritten per-order in `applyInventoryOrderEvent` with the shop's name and the real item
+  // counts — this generic wording is only a fallback for a payload with no proposal attached.
+  PARTIAL_PROPOSED: {
+    title: 'Your order needs your approval',
+    body: 'The shop cannot supply everything you ordered — tap to review the updated order.',
+  },
+  PARTIAL_ACCEPTED: {
+    title: 'Order confirmed',
+    body: 'Thanks! The shop is preparing the items you approved.',
+  },
+  PARTIAL_DECLINED: {
+    title: 'Order cancelled',
+    body: 'You declined the updated order, so it has been cancelled. Nothing will be charged.',
+  },
+  PARTIAL_EXPIRED: {
+    title: 'Order cancelled',
+    body: "The updated order wasn't approved in time, so it has been cancelled. Nothing will be charged.",
+  },
+}
+
+/**
+ * "Chandkheda Daily Mart can only supply 3 of your 5 items — tap to review." Built from the
+ * proposal itself so the customer knows what they are being asked about before opening the app.
+ * Falls back to the generic copy above when the event carries no proposal (an Inventory
+ * deployment mid-rollout, or a malformed payload).
+ */
+function buildPartialProposedNotificationBody(
+  shopName: string,
+  totalItemCount: number,
+  partialFulfilment: InventoryPartialFulfilment | null | undefined,
+): string | null {
+  if (!partialFulfilment || totalItemCount <= 0) {
+    return null
+  }
+
+  const removedCount = partialFulfilment.removedItems.length
+  const reducedCount = partialFulfilment.reducedItems.length
+  const keptCount = Math.max(0, totalItemCount - removedCount)
+
+  if (removedCount > 0 && reducedCount > 0) {
+    return `${shopName} can only partly fill your order (${keptCount} of ${totalItemCount} items, some in smaller quantities) — tap to review.`
+  }
+
+  if (removedCount > 0) {
+    return `${shopName} can only supply ${keptCount} of your ${totalItemCount} items — tap to review.`
+  }
+
+  if (reducedCount > 0) {
+    return `${shopName} has less stock than you ordered for ${reducedCount} item${reducedCount === 1 ? '' : 's'} — tap to review.`
+  }
+
+  return null
 }
 
 /**
@@ -1471,10 +1568,18 @@ async function applyInventoryOrderEvent(input: InventoryOrderEventInput): Promis
   }
 
   const copy = ORDER_EVENT_NOTIFICATION_COPY[input.eventType]
-  const body =
-    input.eventType === 'DRIVER_ASSIGNED' && input.assignedDriver
-      ? `${input.assignedDriver.fullName} (${input.assignedDriver.vehicleType}) has been assigned to your order.`
-      : copy.body
+  let body = copy.body
+
+  if (input.eventType === 'DRIVER_ASSIGNED' && input.assignedDriver) {
+    body = `${input.assignedDriver.fullName} (${input.assignedDriver.vehicleType}) has been assigned to your order.`
+  } else if (input.eventType === 'PARTIAL_PROPOSED') {
+    // Item count is only needed for this one event type, so it is fetched here rather than
+    // widening the order read at the top of this function for every event.
+    const totalItemCount = await prisma.orderItem.count({ where: { orderId: order.id } })
+    body =
+      buildPartialProposedNotificationBody(order.shopName, totalItemCount, input.partialFulfilment) ??
+      copy.body
+  }
 
   await sendPushToCustomer(order.customerUserId, {
     title: copy.title,
@@ -1484,11 +1589,424 @@ async function applyInventoryOrderEvent(input: InventoryOrderEventInput): Promis
   })
 }
 
+
+/* ────────────────────────────────────────────────────────────────────────────────────────────
+ * Shop-side PARTIAL FULFILMENT — the customer's half.
+ *
+ * The shop opened this order in its back office, found it could only supply some of it, and
+ * proposed a reduced version instead of confirming or rejecting. The order is still
+ * PENDING_CONFIRMATION on both sides and nothing has been committed: no stock has moved, no
+ * money has changed, nothing has been cancelled. This is where the customer says yes or no.
+ *
+ * NearCart-Inventory owns the proposal and is the single source of truth for it — it is read
+ * live on every fetch (see `refreshOrderStatusFromInventory`) and never stored here. What this
+ * app DOES own is the customer's bill, which is why the coupon/loyalty re-check below happens
+ * here and is pushed back across the bridge: the shop and the driver must be told to collect the
+ * same figure the customer just approved.
+ * ──────────────────────────────────────────────────────────────────────────────────────────── */
+
+interface PartialFulfilmentDiscountAdjustment {
+  type: 'COUPON' | 'LOYALTY'
+  code?: string | null
+  message: string
+}
+
+/**
+ * Matches the shop's proposal entries (which carry INVENTORY catalog ids) onto this app's own
+ * `OrderItem` rows. Variant ids are tried first and product ids second, because an order can
+ * legitimately contain two variants of the same product — matching on product alone would then
+ * reduce the wrong line. Each OrderItem can be claimed once.
+ */
+function matchProposalEntriesToOrderItems<
+  TEntry extends { productId: string | null; variantId: string | null },
+>(items: OrderWithRelations['items'], entries: TEntry[]): Map<string, TEntry> {
+  const matched = new Map<string, TEntry>()
+  const claimed = new Set<string>()
+
+  for (const entry of entries) {
+    if (!entry.variantId) {
+      continue
+    }
+
+    const item = items.find(
+      (candidate) => !claimed.has(candidate.id) && candidate.inventoryVariantId === entry.variantId,
+    )
+
+    if (item) {
+      claimed.add(item.id)
+      matched.set(item.id, entry)
+    }
+  }
+
+  for (const entry of entries) {
+    if (matched.size === entries.length) {
+      break
+    }
+
+    if ([...matched.values()].includes(entry) || !entry.productId) {
+      continue
+    }
+
+    const item = items.find(
+      (candidate) =>
+        !claimed.has(candidate.id) &&
+        (candidate.inventoryProductId ?? candidate.storeProductId) === entry.productId,
+    )
+
+    if (item) {
+      claimed.add(item.id)
+      matched.set(item.id, entry)
+    }
+  }
+
+  return matched
+}
+
+/**
+ * Re-derives the customer's bill for the reduced basket, and drops any discount that no longer
+ * legitimately applies. Two rules, both about never handing out money that wasn't earned:
+ *
+ *  - a coupon with a minimum spend the reduced subtotal no longer meets is removed outright, and
+ *    the customer is told why (it would otherwise be a discount they didn't qualify for);
+ *  - the combined discount is capped at the order's own pre-discount total, so a discount can
+ *    never exceed what is left of the order.
+ */
+async function recomputeDiscountsForReducedOrder(
+  order: OrderWithRelations,
+  newSubtotal: number,
+): Promise<{
+  discountAmount: number
+  couponCode: string | null
+  couponDropped: boolean
+  loyaltyDiscount: number
+  totalAmount: number
+  adjustments: PartialFulfilmentDiscountAdjustment[]
+}> {
+  const adjustments: PartialFulfilmentDiscountAdjustment[] = []
+  // DELIBERATE: the stored `deliveryFee` is reused verbatim, never recomputed. Fewer items does
+  // not mean a shorter ride — the driver still covers the same distance — and for an order priced
+  // as part of a multi-shop cluster (see `delivery-pricing.service.ts`) re-deriving it here would
+  // also need the rest of the basket, which no longer exists by this point. Same for
+  // `weatherSurchargeFee`.
+  const preDiscountTotal =
+    newSubtotal + order.deliveryFee + order.weatherSurchargeFee + order.platformFee
+
+  const loyaltyDiscount =
+    (await getLoyaltyRedemptionForOrder(order.id))?.discountAmount ?? 0
+  // `Order.discountAmount` is the combined coupon + loyalty figure (there is no separate column
+  // — see `createOrder`), so the coupon's own share is whatever is left after loyalty.
+  let couponDiscount = Math.max(0, order.discountAmount - loyaltyDiscount)
+  let couponCode = order.couponCode ?? null
+  let couponDropped = false
+
+  if (couponCode && couponDiscount > 0) {
+    const coupon = await prisma.coupon.findUnique({ where: { code: couponCode } })
+
+    if (coupon && newSubtotal < coupon.minOrderAmount) {
+      adjustments.push({
+        type: 'COUPON',
+        code: couponCode,
+        message: `Coupon ${couponCode} no longer applies — the updated order is below its ₹${coupon.minOrderAmount} minimum, so the discount has been removed.`,
+      })
+      couponDiscount = 0
+      couponCode = null
+      couponDropped = true
+    }
+  }
+
+  let discountAmount = couponDiscount + loyaltyDiscount
+
+  if (discountAmount > preDiscountTotal) {
+    adjustments.push({
+      type: 'LOYALTY',
+      message:
+        'Your discount was larger than the updated order, so only part of it could be applied to this order.',
+    })
+    discountAmount = preDiscountTotal
+  }
+
+  return {
+    discountAmount,
+    couponCode,
+    couponDropped,
+    loyaltyDiscount: Math.min(loyaltyDiscount, discountAmount),
+    totalAmount: Math.max(0, preDiscountTotal - discountAmount),
+    adjustments,
+  }
+}
+
+/**
+ * `POST /api/orders/:orderId/partial-response` — the customer approves or refuses the shop's
+ * reduced order.
+ *
+ * Order of operations matters: the bridge call goes FIRST, because it is the side that actually
+ * commits anything (accepting there applies the reduced items, confirms the order and moves
+ * stock; declining cancels it). Only once that has succeeded are this app's own rows brought in
+ * line with it — so a failed bridge call leaves the customer's order exactly as it was, with the
+ * proposal still open for them to answer again, rather than desynced.
+ */
+async function respondToPartialFulfilment(
+  orderId: string,
+  accessContext: OrderAccessContext,
+  input: { accepted: boolean },
+) {
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    include: { items: true, shop: true, review: true },
+  })
+
+  if (!order) {
+    throw createHttpError(404, 'Order not found')
+  }
+
+  assertOrderAccessible(order, accessContext)
+
+  if (!order.inventorySalesOrderId || !order.shop?.inventoryOrganizationId) {
+    throw createHttpError(409, 'This order is not waiting for your approval.')
+  }
+
+  let bridgeStatus: Awaited<ReturnType<typeof getInventorySalesOrderStatus>>
+
+  try {
+    bridgeStatus = await getInventorySalesOrderStatus(order.id)
+  } catch (error) {
+    console.warn(
+      `[NearKart] Could not read the partial-fulfilment proposal for order ${order.orderNumber}:`,
+      error instanceof Error ? error.message : error,
+    )
+
+    throw createHttpError(
+      503,
+      "We couldn't reach the shop just now. Please try again in a moment.",
+      { code: 'SHOP_UNAVAILABLE' },
+    )
+  }
+
+  const proposal = bridgeStatus.partialFulfilment
+
+  if (!proposal) {
+    throw createHttpError(409, 'There is nothing to approve on this order.')
+  }
+
+  if (proposal.state !== 'AWAITING_CUSTOMER') {
+    const alreadyAnswered: Record<string, string> = {
+      ACCEPTED: 'You have already approved the updated order.',
+      DECLINED: 'You have already declined the updated order.',
+      EXPIRED: 'This updated order expired before it was approved, so the order was cancelled.',
+    }
+
+    throw createHttpError(409, alreadyAnswered[proposal.state] ?? 'This order is not waiting for your approval.')
+  }
+
+  // Everything below up to the bridge call is pure computation — nothing is written yet.
+  const removedByItemId = matchProposalEntriesToOrderItems(order.items, proposal.removedItems)
+  const reducedByItemId = matchProposalEntriesToOrderItems(order.items, proposal.reducedItems)
+
+  const keptItems = order.items
+    .filter((item) => !removedByItemId.has(item.id))
+    .map((item) => {
+      const reduced = reducedByItemId.get(item.id)
+      const quantity = reduced ? reduced.toQuantity : item.quantity
+
+      return { id: item.id, quantity, lineTotal: item.price * quantity, changed: Boolean(reduced) }
+    })
+
+  const unmatchedCount =
+    proposal.removedItems.length -
+    removedByItemId.size +
+    (proposal.reducedItems.length - reducedByItemId.size)
+
+  if (unmatchedCount > 0) {
+    // Not fatal: the shop's copy of the order is authoritative for what actually gets packed,
+    // and it has already been told. Loud in the logs because it means the two item lists have
+    // drifted and this order's local line items may not mirror what the customer receives.
+    console.warn(
+      `[NearKart] ${unmatchedCount} item(s) in the partial-fulfilment proposal for order ${order.orderNumber} could not be matched to a local OrderItem.`,
+    )
+  }
+
+  const newSubtotal = keptItems.reduce((sum, item) => sum + item.lineTotal, 0)
+  const revised = await recomputeDiscountsForReducedOrder(order, newSubtotal)
+
+  const bridgeResult = await respondToInventoryPartialFulfilment({
+    organizationId: order.shop.inventoryOrganizationId,
+    externalOrderId: order.id,
+    accepted: input.accepted,
+    // Only meaningful on acceptance — a declined order is cancelled and owes nothing.
+    ...(input.accepted
+      ? {
+          revisedPayment: {
+            discountTotal: revised.discountAmount,
+            loyaltyDiscount: revised.loyaltyDiscount,
+            couponCode: revised.couponCode,
+            amountPayable: revised.totalAmount,
+          },
+        }
+      : {}),
+  })
+
+  const beforeSnapshot = {
+    status: order.status,
+    subtotal: order.subtotal,
+    totalAmount: order.totalAmount,
+  }
+
+  const updatedOrder = await prisma.$transaction(async (transaction) => {
+    if (!input.accepted) {
+      // Mirrors what the shop's side did (`cancelSalesOrder` — CANCELLED, no stock reversal
+      // because nothing was ever deducted for a pending order).
+      return transaction.order.update({
+        where: { id: order.id },
+        data: {
+          status: 'CANCELLED',
+          inventorySyncStatus: 'SYNCED',
+          inventorySyncError: null,
+          inventoryLastSyncedAt: new Date(),
+        },
+        include: { items: true, shop: true, review: true },
+      })
+    }
+
+    if (removedByItemId.size > 0) {
+      await transaction.orderItem.deleteMany({ where: { id: { in: [...removedByItemId.keys()] } } })
+    }
+
+    for (const item of keptItems) {
+      if (!item.changed) {
+        continue
+      }
+
+      await transaction.orderItem.update({
+        where: { id: item.id },
+        data: { quantity: item.quantity, lineTotal: item.lineTotal },
+      })
+    }
+
+    if (revised.couponDropped && order.couponCode) {
+      // Give the code back: the redemption never applied to anything in the end, so it must not
+      // count against the customer's per-user limit or the coupon's global usage cap.
+      await transaction.couponRedemption.deleteMany({ where: { orderId: order.id } })
+      await transaction.coupon.updateMany({
+        where: { code: order.couponCode, timesRedeemed: { gt: 0 } },
+        data: { timesRedeemed: { decrement: 1 } },
+      })
+    }
+
+    return transaction.order.update({
+      where: { id: order.id },
+      data: {
+        // Same fields the CONFIRMED webhook path writes (see `applyInventoryOrderEvent`), since
+        // accepting a revised order IS the shop confirming it.
+        status: 'ACCEPTED',
+        acceptedAt: order.acceptedAt ?? new Date(),
+        subtotal: newSubtotal,
+        discountAmount: revised.discountAmount,
+        couponCode: revised.couponCode,
+        totalAmount: revised.totalAmount,
+        inventorySyncStatus: 'SYNCED',
+        inventorySyncError: null,
+        inventoryLastSyncedAt: new Date(),
+      },
+      include: { items: true, shop: true, review: true },
+    })
+  })
+
+  await writeAuditLog({
+    actorId: accessContext.userId,
+    actorType: accessContext.role,
+    action: input.accepted ? 'ORDER_PARTIAL_ACCEPT' : 'ORDER_PARTIAL_DECLINE',
+    entityType: 'Order',
+    entityId: order.id,
+    before: beforeSnapshot,
+    after: {
+      status: updatedOrder.status,
+      subtotal: updatedOrder.subtotal,
+      totalAmount: updatedOrder.totalAmount,
+    },
+  })
+
+  const loyaltyRedemption = await getLoyaltyRedemptionForOrder(updatedOrder.id)
+
+  return {
+    ...mapOrder(updatedOrder),
+    loyaltyRedemption,
+    partialFulfilment: bridgeResult.partialFulfilment ?? null,
+    // Empty on the happy path. Non-empty means a discount the customer had at checkout no longer
+    // survives the reduced order — the client is expected to surface these verbatim.
+    discountAdjustments: input.accepted ? revised.adjustments : [],
+  }
+}
+
+
+/**
+ * How many orders in a customer's list may be checked against the bridge in one request, and how
+ * long the whole batch gets before the list gives up on it.
+ *
+ * The orders list can hold years of history, and each lookup is a real HTTP round trip to the
+ * shop's back office — one call per order would make the list unusably slow. Only orders that
+ * could plausibly be awaiting an answer are looked at (still PENDING_CONFIRMATION, actually
+ * bridged), the newest few at that, and the batch is bounded by a wall-clock budget well below
+ * `inventoryRequestTimeoutMs` (8s) because a list that hangs is worse than a missing badge.
+ */
+const ORDER_LIST_PARTIAL_FULFILMENT_MAX_LOOKUPS = 5
+const ORDER_LIST_PARTIAL_FULFILMENT_BUDGET_MS = 1_500
+
+/**
+ * Resolves which of a customer's orders are currently waiting on them to approve a reduced order,
+ * so the list can show an "action needed" badge without opening each one.
+ *
+ * Fail-soft in every direction, exactly like the detail path: an unreachable, slow or
+ * partially-failing bridge yields fewer (or no) entries and never an error. Only proposals still
+ * in `AWAITING_CUSTOMER` are returned — an already-answered one is not something to nudge about.
+ */
+async function loadPartialFulfilmentsForOrderList(
+  orders: Array<{ id: string; status: OrderStatus; inventorySalesOrderId: string | null }>,
+): Promise<Map<string, InventoryPartialFulfilment>> {
+  const awaiting = new Map<string, InventoryPartialFulfilment>()
+
+  const candidates = orders
+    .filter((order) => order.status === 'PENDING_CONFIRMATION' && Boolean(order.inventorySalesOrderId))
+    .slice(0, ORDER_LIST_PARTIAL_FULFILMENT_MAX_LOOKUPS)
+
+  if (candidates.length === 0) {
+    return awaiting
+  }
+
+  const lookups = candidates.map(async (order) => {
+    try {
+      const bridgeStatus = await getInventorySalesOrderStatus(order.id)
+
+      if (bridgeStatus.partialFulfilment?.state === 'AWAITING_CUSTOMER') {
+        awaiting.set(order.id, bridgeStatus.partialFulfilment)
+      }
+    } catch (error) {
+      console.warn(
+        `[NearKart] Could not check order ${order.id} for a pending shop proposal while building the orders list:`,
+        error instanceof Error ? error.message : error,
+      )
+    }
+  })
+
+  // Whatever has landed by the deadline is what the list shows. The stragglers keep running
+  // harmlessly (each already swallows its own errors) and simply miss this response.
+  await Promise.race([
+    Promise.allSettled(lookups),
+    new Promise<void>((resolve) => {
+      setTimeout(resolve, ORDER_LIST_PARTIAL_FULFILMENT_BUDGET_MS).unref?.()
+    }),
+  ])
+
+  return awaiting
+}
+
 export {
   applyInventoryOrderEvent,
+  INVENTORY_ORDER_EVENT_TYPES,
   buildInventoryPaymentPayload,
   cancelOrder,
   createOrder,
   getOrderById,
+  loadPartialFulfilmentsForOrderList,
   reconcileFailedInventorySyncs,
+  respondToPartialFulfilment,
 }
