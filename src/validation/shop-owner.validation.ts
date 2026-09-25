@@ -88,9 +88,18 @@ const updateShopSchema = createShopSchema
 // `reason` only means anything when `isOpen === false` (see `shop-owner.service.ts`'s
 // `updateShopTodayStatus`, which clears it whenever `isOpen === true`) — free text, shop owner's
 // choice (e.g. "Holiday"), so no enum/min-length constraint beyond a sane upper bound.
+// 24h "HH:MM" (what isShopOpenNow parses). Optional: when opening, the owner may also set/confirm
+// the shop's hours (2026-09-25); omitted = keep the stored hours.
+const shopClockTime = z
+  .string()
+  .trim()
+  .regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Use 24-hour HH:MM')
+
 const updateShopTodayStatusSchema = z.object({
   isOpen: z.boolean(),
   reason: z.string().trim().max(200).optional().or(z.literal('')),
+  openingTime: shopClockTime.optional(),
+  closingTime: shopClockTime.optional(),
 })
 
 type UpdateShopOwnerProfileInput = z.infer<typeof updateShopOwnerProfileSchema>

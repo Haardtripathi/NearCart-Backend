@@ -49,6 +49,8 @@ function mapShopTodayStatusItem(shop: Shop) {
     isOpenToday: shop.isOpenToday,
     todayStatusReason: shop.todayStatusReason,
     todayStatusUpdatedAt: shop.todayStatusUpdatedAt,
+    openingTime: shop.openingTime,
+    closingTime: shop.closingTime,
   }
 }
 

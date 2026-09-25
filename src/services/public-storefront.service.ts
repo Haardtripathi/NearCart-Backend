@@ -232,6 +232,9 @@ function mapPublicShopSummary(shop: PublicShopSummaryRow) {
     isOpenNow,
     todayStatus,
     todayStatusReason: shop.todayStatusReason,
+    // On the list too (2026-09-25) so a card can say "Opens at 7:00 AM" instead of "Opening soon".
+    openingTime: shop.openingTime,
+    closingTime: shop.closingTime,
   }
 }
 

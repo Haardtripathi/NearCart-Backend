@@ -380,6 +380,8 @@ function buildShopTodayStatusData(payload: UpdateShopTodayStatusInput) {
       ? null
       : normalizeOptionalString(payload.reason),
     todayStatusUpdatedAt: new Date(),
+    ...(payload.openingTime ? { openingTime: payload.openingTime } : {}),
+    ...(payload.closingTime ? { closingTime: payload.closingTime } : {}),
   }
 }
 
