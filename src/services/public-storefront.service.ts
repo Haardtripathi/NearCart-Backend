@@ -1,6 +1,7 @@
 import { Prisma, type Shop } from '@prisma/client'
 
 import prisma from '../lib/prisma'
+import env from '../config/env'
 import { getCachedJson, shopDirectoryCacheKey } from '../lib/cache'
 import { getDeliveryEtaMinutes } from './delivery-eta.service'
 import { getShopRatingSummary } from './order-review.service'
@@ -53,10 +54,10 @@ const PUBLIC_MAPPED_SHOP_WHERE = {
 }
 
 // Platform default "nearby" radius (km), used when a shop hasn't configured its own
-// `serviceRadiusKm`. Mirrors `DRIVER_MATCH_RADIUS_KM`'s default on the sibling
-// NearCart-Inventory backend (same kind of nearest-match radius), for consistency of what
-// counts as "nearby" across the product.
-const DEFAULT_SHOP_MATCH_RADIUS_KM = 15
+// `serviceRadiusKm`. 2026-09-24 (owner): 3 km — this was a separate hardcoded 15 km while checkout
+// used env's 10 km, so a customer saw shops 7 km away that were never meant to be "nearby". Both
+// now read the same env value. A shop owner may still set a larger radius for their own shop.
+const DEFAULT_SHOP_MATCH_RADIUS_KM = env.defaultServiceRadiusKm
 
 // v1 bounded-fan-out tuning — see searchPublicCatalog/listTrendingProducts. No cross-shop
 // search index exists; this trades completeness for a hard ceiling on concurrent outbound
@@ -289,8 +290,24 @@ async function attachLiveEta<T extends Record<string, unknown>>(
     mode,
   })
 
+  // 2026-09-24 (owner): browse showed the shop's flat `deliveryFeeDefault` (₹15 on every seeded
+  // shop) while checkout charged the distance-based fee. When we know where the customer is, show
+  // the same `computeDeliveryFee` checkout will charge for a single-shop order; the flat fee stays
+  // only as the no-location fallback, exactly like checkout.
+  const distanceFee =
+    mapped.deliveryEnabled !== false &&
+    shop.latitude != null &&
+    shop.longitude != null &&
+    customerCoordinates?.latitude != null &&
+    customerCoordinates?.longitude != null
+      ? computeDeliveryFee(
+          haversineDistanceKm(shop.latitude, shop.longitude, customerCoordinates.latitude, customerCoordinates.longitude),
+        )
+      : null
+
   return {
     ...mapped,
+    ...(distanceFee != null ? { deliveryFee: distanceFee } : {}),
     liveEstimatedDeliveryMinutes: eta.etaMinutes,
   }
 }

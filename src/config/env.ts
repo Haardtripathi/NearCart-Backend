@@ -135,7 +135,9 @@ const env = {
   googleMapsApiKey: process.env.GOOGLE_MAPS_API_KEY || '',
   weatherApiKey: process.env.WEATHER_API_KEY || '',
   defaultServiceRadiusKm:
-    Number.parseFloat(process.env.DEFAULT_SERVICE_RADIUS_KM || '') || 10,
+    // 3 km (owner, 2026-09-24): hyperlocal — both the browse filter and checkout's service-area
+    // check use this for shops that haven't set their own radius.
+    Number.parseFloat(process.env.DEFAULT_SERVICE_RADIUS_KM || '') || 3,
   // Distance-based delivery fee formula (see `utils/geo.ts`'s `computeDeliveryFee`):
   // fee = clamp(deliveryFeeBase + deliveryFeePerKm * distanceKm, deliveryFeeMin, deliveryFeeMax).
   // These are placeholder business figures, not a tuned pricing model — override via env once

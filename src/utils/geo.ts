@@ -129,7 +129,7 @@ function computeDeliveryFee(distanceKm: number): number {
  *    there is nothing to measure against, and blocking every order for
  *    shops that haven't set coordinates yet would be worse than a no-op.
  *  - Shop has coordinates but `serviceRadiusKm` is null: falls back to
- *    `DEFAULT_SERVICE_RADIUS_KM` (env, default 10km) rather than skipping —
+ *    `DEFAULT_SERVICE_RADIUS_KM` (env, default 3km) rather than skipping —
  *    a shop with known coordinates should still get *some* hyperlocal
  *    bound, not an unlimited one, even before they've explicitly set a
  *    radius.
