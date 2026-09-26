@@ -7,7 +7,7 @@ import { writeAuditLog } from './audit.service'
 import { resolveCouponForCheckout, recordCouponRedemption } from './coupon.service'
 import { getDeliveryEtaMinutes } from './delivery-eta.service'
 import {
-  awardLoyaltyPointsForOrder,
+  // awardLoyaltyPointsForOrder, — LOYALTY DISABLED 2026-09-26 (owner)
   getLoyaltyRedemptionForOrder,
   recordLoyaltyRedemption,
   resolveLoyaltyRedemptionForCheckout,
@@ -470,7 +470,9 @@ async function createOrderLocked(
     // call even when the request is stale or the customer has no points at all (resolves to 0).
     const loyaltyResolution = await resolveLoyaltyRedemptionForCheckout(transaction, {
       customerUserId: options.customerUserId,
-      requestedPoints: payload.useLoyaltyPoints ?? 0,
+      // LOYALTY DISABLED 2026-09-26 (owner): rewards are off — never redeem, whatever the client
+      // sends. Restore `payload.useLoyaltyPoints ?? 0` to bring redemption back.
+      requestedPoints: 0,
       subtotal: checkoutSnapshot.summary.subtotal,
     })
     const loyaltyDiscountAmount = loyaltyResolution.discountAmount
@@ -1083,9 +1085,10 @@ async function refreshOrderStatusFromInventory(
       include: { items: true, shop: true, review: true },
     })
 
-    if (mappedStatus === 'DELIVERED' && hasForwardStatusMove) {
-      await awardLoyaltyPointsForOrder(updatedOrder)
-    }
+    // LOYALTY DISABLED 2026-09-26 (owner): delivered orders no longer earn points.
+    // if (mappedStatus === 'DELIVERED' && hasForwardStatusMove) {
+    //   await awardLoyaltyPointsForOrder(updatedOrder)
+    // }
 
     return {
       order: updatedOrder,
@@ -1535,9 +1538,10 @@ async function applyInventoryOrderEvent(input: InventoryOrderEventInput): Promis
 
     await prisma.order.update({ where: { id: order.id }, data: updateData })
 
-    if (mappedStatus === 'DELIVERED') {
-      await awardLoyaltyPointsForOrder(order)
-    }
+    // LOYALTY DISABLED 2026-09-26 (owner): delivered orders no longer earn points.
+    // if (mappedStatus === 'DELIVERED') {
+    //   await awardLoyaltyPointsForOrder(order)
+    // }
   } else if (input.eventType === 'DRIVER_ASSIGNED' && input.assignedDriver) {
     // DRIVER_ASSIGNED doesn't map to a NearCart OrderStatus change on its own (mappedStatus is
     // null for it — see `mapInventorySalesOrderStatus`), so the branch above never runs for this
