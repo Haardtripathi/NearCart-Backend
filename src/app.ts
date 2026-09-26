@@ -21,7 +21,13 @@ app.use(helmet())
 app.use(cors(corsOptions))
 app.use(express.json({ limit: env.requestBodyLimit }))
 app.use(express.urlencoded({ extended: true, limit: env.requestBodyLimit }))
-app.use(morgan(env.nodeEnv === 'production' ? 'combined' : 'dev'))
+// Only log API traffic. The server is on a public IP, so internet-wide scanners (e.g. bots
+// brute-forcing Synology NAS logins at /webapi/entry.cgi) were ~99% of the log — all 404s.
+app.use(
+  morgan(env.nodeEnv === 'production' ? 'combined' : 'dev', {
+    skip: (request) => !request.originalUrl.startsWith('/api'),
+  }),
+)
 
 app.get('/', (_request, response) => {
   response.status(200).json({
