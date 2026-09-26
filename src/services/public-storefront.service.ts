@@ -887,42 +887,91 @@ function filterShopsInServiceRange<T extends GeoScopedShop>(
     .map(({ shop }) => shop)
 }
 
+// How often the no-coordinates fan-out window moves on to the next slice of shops.
+const CANDIDATE_SHOP_ROTATION_MS = 5 * 60_000
+
+interface CandidateShops {
+  shops: PublicShopSummaryRow[]
+  // Every shop that was eligible before the fan-out cap — lets the response say "searched 15 of
+  // 40 shops" instead of silently implying the whole neighbourhood/marketplace was covered.
+  totalEligible: number
+}
+
 async function fetchCandidateShops(
   filters: { category?: string | null; city?: string | null } | undefined,
   take: number,
   customerCoordinates?: CustomerCoordinates | null,
-): Promise<Shop[]> {
-  const shops = await prisma.shop.findMany({
-    where: {
-      ...PUBLIC_MAPPED_SHOP_WHERE,
-      ...(filters?.category ? { category: filters.category } : {}),
-      // See listPublicShops above — `contains` for the same case-insensitivity reason, so
-      // search/trending fan-out don't silently return zero candidate shops on a casing mismatch.
-      ...(filters?.city ? { city: { contains: filters.city } } : {}),
-    },
-    orderBy: [{ createdAt: 'desc' }, { name: 'asc' }],
-    // With coordinates the fan-out cap has to apply AFTER the distance filter — capping first
-    // would let far-away shops crowd the nearby ones out of the candidate set entirely.
-    ...(customerCoordinates ? {} : { take }),
-  })
+): Promise<CandidateShops> {
+  const where: Prisma.ShopWhereInput = {
+    ...PUBLIC_MAPPED_SHOP_WHERE,
+    ...(filters?.category ? { category: filters.category } : {}),
+    // See listPublicShops above — `contains` for the same case-insensitivity reason, so
+    // search/trending fan-out don't silently return zero candidate shops on a casing mismatch.
+    ...(filters?.city ? { city: { contains: filters.city } } : {}),
+  }
 
   // BUG FIX (found on-device 2026-09-19): trending/search ignored the customer's location, so
   // the home screen advertised products from shops that weren't in "Shops near you" and
-  // couldn't deliver to them. No coordinates supplied = unchanged legacy behavior.
-  return customerCoordinates ? filterShopsInServiceRange(shops, customerCoordinates).slice(0, take) : shops
+  // couldn't deliver to them. With coordinates the fan-out cap has to apply AFTER the distance
+  // filter — capping first would let far-away shops crowd the nearby ones out of the candidate
+  // set entirely — so the bounding-box pre-filter (same as computePublicShops) is what keeps
+  // this from reading every mapped shop in the marketplace.
+  if (customerCoordinates) {
+    const shops = await prisma.shop.findMany({
+      select: PUBLIC_SHOP_SUMMARY_SELECT,
+      where: { ...where, ...(await buildServiceRangePrefilter(customerCoordinates)) },
+    })
+    const inRange = filterShopsInServiceRange(shops, customerCoordinates)
+
+    return { shops: inRange.slice(0, take), totalEligible: inRange.length }
+  }
+
+  // No coordinates: this used to take the `take` NEWEST shops, so once the marketplace outgrew
+  // the cap the older shops were never searched at all. Now a stable name order with a window
+  // that rotates every few minutes (wrapping around the end), so every shop takes its turn.
+  const totalEligible = await prisma.shop.count({ where })
+  const orderBy: Prisma.ShopOrderByWithRelationInput[] = [{ name: 'asc' }, { id: 'asc' }]
+
+  if (totalEligible <= take) {
+    const shops = await prisma.shop.findMany({ select: PUBLIC_SHOP_SUMMARY_SELECT, where, orderBy })
+
+    return { shops, totalEligible }
+  }
+
+  const offset = Math.floor(Date.now() / CANDIDATE_SHOP_ROTATION_MS) % totalEligible
+  const head = await prisma.shop.findMany({
+    select: PUBLIC_SHOP_SUMMARY_SELECT,
+    where,
+    orderBy,
+    skip: offset,
+    take,
+  })
+  const wrapped =
+    head.length < take
+      ? await prisma.shop.findMany({
+          select: PUBLIC_SHOP_SUMMARY_SELECT,
+          where,
+          orderBy,
+          take: take - head.length,
+        })
+      : []
+
+  return { shops: [...head, ...wrapped], totalEligible }
 }
 
 interface FannedOutShopCatalog {
-  shop: Shop
+  shop: PublicShopSummaryRow
   items: InventoryCatalogItem[]
+  // The shop's full match count from its catalog pagination — `items` is capped per shop.
+  totalItems: number
 }
 
 // Queries N shops' inventory-bridge catalogs in parallel and keeps only the ones that
 // answered. Promise.allSettled (not Promise.all) is deliberate: this hits N independent
 // remote services, and one shop's bridge being slow/down must not fail the whole request.
 async function fanOutCatalogAcrossShops(
-  shops: Shop[],
-  buildParams: (shop: Shop) => Parameters<typeof listInventoryCatalog>[0],
+  shops: PublicShopSummaryRow[],
+  buildParams: (shop: PublicShopSummaryRow) => Parameters<typeof listInventoryCatalog>[0],
 ): Promise<FannedOutShopCatalog[]> {
   const settled = await Promise.allSettled(
     shops.map(async (shop) => ({
@@ -936,11 +985,15 @@ async function fanOutCatalogAcrossShops(
       (
         result,
       ): result is PromiseFulfilledResult<{
-        shop: Shop
+        shop: PublicShopSummaryRow
         catalog: InventoryCatalogResponse
       }> => result.status === 'fulfilled',
     )
-    .map((result) => ({ shop: result.value.shop, items: result.value.catalog.items }))
+    .map((result) => ({
+      shop: result.value.shop,
+      items: result.value.catalog.items,
+      totalItems: result.value.catalog.pagination?.totalItems ?? result.value.catalog.items.length,
+    }))
 }
 
 // Round-robin interleave across shop groups (take item 0 from every shop, then item 1 from
@@ -961,8 +1014,8 @@ async function fanOutCatalogAcrossShops(
 function interleaveShopResults(
   groups: FannedOutShopCatalog[],
   limit: number,
-): Array<{ shop: Shop; item: InventoryCatalogItem }> {
-  const merged: Array<{ shop: Shop; item: InventoryCatalogItem }> = []
+): Array<{ shop: PublicShopSummaryRow; item: InventoryCatalogItem }> {
+  const merged: Array<{ shop: PublicShopSummaryRow; item: InventoryCatalogItem }> = []
   const seenKeys = new Set<string>()
   let index = 0
   let addedInLastPass = true
@@ -995,7 +1048,7 @@ function interleaveShopResults(
   return merged
 }
 
-function mapCatalogItemForSearchResult(shop: Shop, item: InventoryCatalogItem) {
+function mapCatalogItemForSearchResult(shop: PublicShopSummaryRow, item: InventoryCatalogItem) {
   return {
     ...mapCatalogItemForPublicApi(item),
     shop: mapPublicShopSummary(shop),
@@ -1018,7 +1071,7 @@ async function searchPublicCatalog(
   },
 ) {
   const limit = options?.limit ?? 24
-  const candidateShops = await fetchCandidateShops(
+  const { shops: candidateShops, totalEligible } = await fetchCandidateShops(
     { category: options?.category, city: options?.city },
     SEARCH_FANOUT_SHOP_CAP,
     options?.customerCoordinates,
@@ -1034,11 +1087,21 @@ async function searchPublicCatalog(
     language: options?.language,
   }))
   const merged = interleaveShopResults(groups, limit)
+  // Each shop contributes at most SEARCH_PER_SHOP_RESULT_CAP items, so without this a client had
+  // no way to know a shop matched more than it was shown. Keyed by shop id; the client compares
+  // it with how many of that shop's items it received to offer "+N more at <shop>".
+  const perShopTotals: Record<string, number> = {}
+  for (const group of groups) {
+    perShopTotals[group.shop.id] = group.totalItems
+  }
 
   return {
     items: merged.map(({ shop, item }) => mapCatalogItemForSearchResult(shop, item)),
     meta: {
       query,
+      limit,
+      perShopTotals,
+      shopsTotal: totalEligible,
       shopsSearched: candidateShops.length,
       shopsSucceeded: groups.length,
       shopsFailed: candidateShops.length - groups.length,
@@ -1058,7 +1121,7 @@ async function computeTrendingProducts(options?: {
   customerCoordinates?: CustomerCoordinates | null
 }) {
   const limit = options?.limit ?? 20
-  const candidateShops = await fetchCandidateShops(
+  const { shops: candidateShops, totalEligible } = await fetchCandidateShops(
     { category: options?.category, city: options?.city },
     TRENDING_FANOUT_SHOP_CAP,
     options?.customerCoordinates,
@@ -1077,6 +1140,7 @@ async function computeTrendingProducts(options?: {
   return {
     items: merged.map(({ shop, item }) => mapCatalogItemForSearchResult(shop, item)),
     meta: {
+      shopsTotal: totalEligible,
       shopsQueried: candidateShops.length,
       shopsSucceeded: groups.length,
       strategy: 'featured-fanout-v1-not-real-trending',

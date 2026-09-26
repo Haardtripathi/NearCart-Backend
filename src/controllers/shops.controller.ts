@@ -5,7 +5,7 @@ import {
   getPublicShop,
   listPublicShops,
 } from '../services/public-storefront.service'
-import { shopGeoQuerySchema } from '../validation/public.validation'
+import { shopGeoQuerySchema, shopListQuerySchema } from '../validation/public.validation'
 
 async function listShops(
   request: Request,
@@ -13,11 +13,19 @@ async function listShops(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const geo = shopGeoQuerySchema.parse(request.query)
+    // Same query contract as `GET /public/shops` — this legacy route used to parse only lat/lng,
+    // so it always served page 1 (50 shops) with no way to reach the rest or to filter.
+    const query = shopListQuerySchema.parse(request.query)
     const result = await listPublicShops(
-      geo.lat != null && geo.lng != null
-        ? { latitude: geo.lat, longitude: geo.lng }
+      query.lat != null && query.lng != null
+        ? { latitude: query.lat, longitude: query.lng }
         : null,
+      {
+        search: query.search || undefined,
+        category: query.category || undefined,
+        city: query.city || undefined,
+      },
+      { page: query.page, limit: query.limit },
     )
 
     response.status(200).json({
